@@ -1,11 +1,11 @@
 // ignore_for_file: use_build_context_synchronously
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, kDebugMode;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
-import 'dart:convert';
+import 'dart:developer' as developer;
 
 class QRScannerScreen extends StatefulWidget {
   const QRScannerScreen({super.key});
@@ -41,102 +41,51 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     super.dispose();
   }
 
-  // Helper to recursively search JSON for a WebSocket URL string
-  String? _findWebSocketUrlInJson(dynamic json) {
-    if (json == null) return null;
-    if (json is String) {
-      if (json.startsWith('ws://') || json.startsWith('wss://')) {
-        return json;
-      }
-      return null;
-    }
-    if (json is Map) {
-      for (var value in json.values) {
-        final result = _findWebSocketUrlInJson(value);
-        if (result != null) return result;
-      }
-    }
-    if (json is List) {
-      for (var item in json) {
-        final result = _findWebSocketUrlInJson(item);
-        if (result != null) return result;
-      }
-    }
-    return null;
-  }
-
-  // ✅ FIXED: ONLY returns ws:// or wss:// URLs
+  // ─── URL resolver: fetches session ID and builds SSE URL ──────────
   Future<String> _resolveUrl(String input) async {
     input = input.trim();
 
-    // 1. Already a WebSocket URL?
+    // 1. Already a WebSocket URL? (backward compatibility)
     if (input.startsWith('ws://') || input.startsWith('wss://')) {
       return input;
     }
 
-    // 2. Must be an HTTP(S) URL to fetch
+    // 2. Must be an HTTP(S) URL to fetch.
     if (!input.startsWith('http://') && !input.startsWith('https://')) {
       throw Exception(
           'Invalid URL format. Please enter a ws://, wss://, http://, or https:// URL.');
     }
 
+    // 3. Fetch the HTML.
     final response = await http.get(Uri.parse(input));
     if (response.statusCode != 200) {
       throw Exception('Server returned HTTP ${response.statusCode}');
     }
 
-    String body = response.body.trim();
+    String body = response.body;
 
-    // 🔍 DEBUG: print the raw response to the console (this will appear in the terminal)
-    if (kDebugMode) {
-      print('===== RAW RESPONSE =====');
-    }
-    if (kDebugMode) {
-      print(body);
-    }
-    if (kDebugMode) {
-      print('========================');
-    }
+    // Debug: print first 500 chars.
+    developer.log('Raw response (first 500 chars): ${body.substring(0, body.length > 500 ? 500 : body.length)}');
 
-    // 3. Try to parse as JSON
-    try {
-      final json = jsonDecode(body);
-      String? found = _findWebSocketUrlInJson(json);
-      if (found != null) {
-        if (found.startsWith('ws://') || found.startsWith('wss://')) {
-          return found;
-        } else {
-          throw Exception('Found a URL in JSON but it is not a WebSocket endpoint: $found');
-        }
-      }
-    } catch (_) {
-      // Not JSON, continue
+    // 4. Extract session ID from window.sessionId = "...";
+    final sessionIdRegex = RegExp(r'window\.sessionId\s*=\s*"([^"]+)"');
+    final match = sessionIdRegex.firstMatch(body);
+    if (match == null) {
+      throw Exception('Could not find window.sessionId in the page.');
     }
+    final sessionId = match.group(1)!;
+    developer.log('Extracted session ID: $sessionId');
 
-    // 4. If the whole body is a WebSocket URL, use it
-    if (body.startsWith('ws://') || body.startsWith('wss://')) {
-      return body;
-    }
-
-    // 5. Use regex to find ws:// or wss:// URLs ONLY
-    final regex = RegExp(r'(wss?://[^\s"]+)');
-    final match = regex.firstMatch(body);
-    if (match != null) {
-      String url = match.group(0)!;
-      if (url.startsWith('ws://') || url.startsWith('wss://')) {
-        return url;
-      }
-      // If it's not a WebSocket URL, ignore it.
-    }
-
-    // 6. Nothing worked – throw with the response body for debugging
-    throw Exception(
-      'Could not find a WebSocket URL (wss:// or ws://) in the response.\n'
-      'Response body (first 300 chars): ${body.substring(0, body.length > 300 ? 300 : body.length)}',
-    );
+    // 5. Build the SSE (EventSource) URL – HTTP/HTTPS
+    final uri = Uri.parse(input);
+    final host = uri.host;
+    final scheme = uri.scheme; // https
+    final sseUrl = '$scheme://$host/webapi/stream?channel=$sessionId';
+    developer.log('Constructed SSE URL: $sseUrl');
+    return sseUrl;
   }
 
-  // Save URL to history
+  // ─── History helper ───────────────────────────────────────────────
   Future<void> _addToHistory(String url) async {
     final prefs = await SharedPreferences.getInstance();
     List<String> history = prefs.getStringList('session_history') ?? [];
@@ -165,8 +114,6 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
 
     try {
       websocketUrl = await _resolveUrl(rawInput);
-
-      // Save to history
       await _addToHistory(websocketUrl);
 
       final prefs = await SharedPreferences.getInstance();
@@ -195,6 +142,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     }
   }
 
+  // ─── UI builders ──────────────────────────────────────────────────
   Widget _buildManualEntryScreen() {
     final TextEditingController textController = TextEditingController();
 

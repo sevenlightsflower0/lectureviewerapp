@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
@@ -6,6 +7,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:http/http.dart' as http;
 import '../models/transcript_message.dart';
 
 class LiveTranscriptScreen extends StatefulWidget {
@@ -18,7 +20,7 @@ class LiveTranscriptScreen extends StatefulWidget {
 
 class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   WebSocketChannel? _channel;
-  TranscriptMessage? _latestMessage;
+  StreamSubscription? _sseSubscription;
   bool _isConnected = false;
   String? _errorMessage;
   bool _isConnecting = false;
@@ -27,11 +29,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   final FlutterTts _flutterTts = FlutterTts();
   bool _ttsEnabled = true;
 
-  // Firestore (optional)
+  // Firestore
   CollectionReference? _transcriptsRef;
   String _sessionId = '';
 
-  // Platform check
+  // UI state
+  TranscriptMessage? _latestMessage;
+
   bool get _isDesktop {
     if (kIsWeb) return false;
     switch (defaultTargetPlatform) {
@@ -58,7 +62,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   Future<void> _initFirebaseAndSession() async {
-    // Try Firebase auth, but don't block the WebSocket connection
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
@@ -70,7 +73,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         _sessionId = prefs.getString('session_id_${widget.initialUrl}') ??
             DateTime.now().millisecondsSinceEpoch.toString();
         await prefs.setString('session_id_${widget.initialUrl}', _sessionId);
-
         _transcriptsRef = FirebaseFirestore.instance
             .collection('users')
             .doc(currentUser.uid)
@@ -83,67 +85,124 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         debugPrint('⚠️ Firebase not configured on desktop. Continuing without it.');
       } else {
         debugPrint('Firebase error: $e');
-        setState(() => _errorMessage = 'Firebase error: $e (WebSocket will still try to connect)');
+        setState(() => _errorMessage = 'Firebase error: $e (will still try to connect)');
       }
       _sessionId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     }
-
     _connect(widget.initialUrl);
   }
 
+  // ─── Connection dispatcher ───────────────────────────────
   void _connect(String url) {
-    // Ensure URL is a WebSocket URL (convert http(s) to ws(s) if needed)
-    String wsUrl = url;
-    if (url.startsWith('http://')) {
-      wsUrl = url.replaceFirst('http://', 'ws://');
-    } else if (url.startsWith('https://')) {
-      wsUrl = url.replaceFirst('https://', 'wss://');
-    }
-    debugPrint('🔗 Connecting to WebSocket: $wsUrl');
-
     setState(() {
       _errorMessage = null;
       _isConnected = false;
       _isConnecting = true;
     });
 
+    // SSE uses HTTP/HTTPS
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      _connectSSE(url);
+    } else {
+      _connectWebSocket(url);
+    }
+  }
+
+  // ─── Manual SSE client ───────────────────────────────────
+  void _connectSSE(String url) {
+    debugPrint('🔗 Connecting to SSE: $url');
+
+    final headers = {
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    };
+
+    http.Client().send(http.Request('GET', Uri.parse(url))
+      ..headers.addAll(headers)
+    ).then((response) {
+      if (response.statusCode != 200) {
+        throw Exception('Server returned HTTP ${response.statusCode}');
+      }
+      final stream = response.stream.transform(utf8.decoder);
+
+      String buffer = '';
+      StreamSubscription<String> subscription;
+      subscription = stream.listen((String chunk) {
+        buffer += chunk;
+        final events = buffer.split('\n\n');
+        if (events.length > 1) {
+          buffer = events.removeLast();
+          for (final eventBlock in events) {
+            _parseSSEEvent(eventBlock);
+          }
+        }
+      }, onError: (error) {
+        debugPrint('❌ SSE stream error: $error');
+        setState(() {
+          _errorMessage = 'SSE error: $error';
+          _isConnected = false;
+          _isConnecting = false;
+        });
+      }, onDone: () {
+        debugPrint('🔌 SSE disconnected');
+        setState(() {
+          _isConnected = false;
+          _isConnecting = false;
+        });
+      });
+      _sseSubscription = subscription;
+
+      setState(() {
+        _isConnected = true;
+        _isConnecting = false;
+      });
+    }).catchError((error) {
+      debugPrint('❌ Failed to connect SSE: $error');
+      setState(() {
+        _errorMessage = 'Failed to connect: $error';
+        _isConnected = false;
+        _isConnecting = false;
+      });
+    });
+  }
+
+  void _parseSSEEvent(String eventBlock) {
+    final lines = eventBlock.split('\n');
+    StringBuffer dataBuffer = StringBuffer();
+
+    for (final line in lines) {
+      if (line.startsWith('data:')) {
+        dataBuffer.writeln(line.substring(5).trim());
+      }
+      // We ignore 'event:' lines for now; they aren't needed.
+    }
+
+    final data = dataBuffer.toString().trim();
+    if (data.isEmpty) return;
+
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
+      final json = jsonDecode(data);
+      _handleMessage(json);
+    } catch (e) {
+      debugPrint('⚠️ Failed to parse SSE data: $e');
+    }
+  }
+
+  // ─── WebSocket connection (fallback) ────────────────────
+  void _connectWebSocket(String url) {
+    debugPrint('🔗 Connecting to WebSocket: $url');
+
+    try {
+      _channel = WebSocketChannel.connect(Uri.parse(url));
       _channel!.stream.listen(
         (data) async {
-          TranscriptMessage message;
           try {
             final Map<String, dynamic> json =
                 data is String ? jsonDecode(data) : data as Map<String, dynamic>;
-            message = TranscriptMessage.fromJson(json);
+            await _handleMessage(json);
           } catch (e) {
-            message = TranscriptMessage(
-              transcript: data.toString(),
-              translations: {},
-              timestamp: DateTime.now(),
-            );
-          }
-
-          if (_transcriptsRef != null) {
-            try {
-              await _transcriptsRef!.add({
-                'transcript': message.transcript,
-                'translations': message.translations,
-                'timestamp': Timestamp.fromDate(message.timestamp),
-              });
-            } catch (e) {
-              debugPrint('⚠️ Could not save to Firestore: $e');
-            }
-          }
-
-          setState(() {
-            _latestMessage = message;
-            _isConnected = true;
-            _isConnecting = false;
-          });
-
-          if (_ttsEnabled && message.transcript.isNotEmpty) {
-            await _flutterTts.speak(message.transcript);
+            debugPrint('⚠️ WebSocket parse error: $e');
           }
         },
         onError: (error) {
@@ -163,7 +222,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         },
       );
     } catch (e) {
-      debugPrint('❌ Failed to connect: $e');
+      debugPrint('❌ Failed to connect WebSocket: $e');
       setState(() {
         _errorMessage = 'Failed to connect: $e';
         _isConnected = false;
@@ -172,8 +231,46 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
+  // ─── Shared message handler ─────────────────────────────
+  Future<void> _handleMessage(Map<String, dynamic> json) async {
+    TranscriptMessage message;
+    try {
+      message = TranscriptMessage.fromJson(json);
+    } catch (e) {
+      message = TranscriptMessage(
+        transcript: json.toString(),
+        translations: {},
+        timestamp: DateTime.now(),
+      );
+    }
+
+    if (_transcriptsRef != null) {
+      try {
+        await _transcriptsRef!.add({
+          'transcript': message.transcript,
+          'translations': message.translations,
+          'timestamp': Timestamp.fromDate(message.timestamp),
+        });
+      } catch (e) {
+        debugPrint('⚠️ Could not save to Firestore: $e');
+      }
+    }
+
+    setState(() {
+      _latestMessage = message;
+      _isConnected = true;
+      _isConnecting = false;
+    });
+
+    if (_ttsEnabled && message.transcript.isNotEmpty) {
+      await _flutterTts.speak(message.transcript);
+    }
+  }
+
   void _reconnect() {
     _channel?.sink.close();
+    _sseSubscription?.cancel();
+    _sseSubscription = null;
     _connect(widget.initialUrl);
   }
 
@@ -189,6 +286,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     await prefs.remove('session_url');
     await prefs.remove('session_id_${widget.initialUrl}');
     _channel?.sink.close();
+    _sseSubscription?.cancel();
+    _sseSubscription = null;
     await _flutterTts.stop();
     if (mounted) {
       Navigator.pushReplacementNamed(context, '/scan');
@@ -198,6 +297,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   @override
   void dispose() {
     _channel?.sink.close();
+    _sseSubscription?.cancel();
+    _sseSubscription = null;
     _flutterTts.stop();
     super.dispose();
   }
@@ -206,7 +307,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Live Transcript (latest only)'),
+        title: const Text('Live Transcript'),
         actions: [
           IconButton(
             icon: Icon(_ttsEnabled ? Icons.volume_up : Icons.volume_off),
