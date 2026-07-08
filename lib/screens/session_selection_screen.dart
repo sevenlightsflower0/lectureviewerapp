@@ -3,22 +3,33 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:developer' as developer;
-import '../route_observer.dart'; // <-- import the global observer
+import '../route_observer.dart';
 
 class SessionHistoryItem {
   final String url;
-  final DateTime lastConnected;
+  String name;                // editable display name
+  final DateTime firstConnected; // first connection date
+  DateTime lastConnected;     // last connection date (for sorting)
 
-  SessionHistoryItem({required this.url, required this.lastConnected});
+  SessionHistoryItem({
+    required this.url,
+    required this.name,
+    required this.firstConnected,
+    required this.lastConnected,
+  });
 
   Map<String, dynamic> toJson() => {
         'url': url,
+        'name': name,
+        'firstConnected': firstConnected.toIso8601String(),
         'lastConnected': lastConnected.toIso8601String(),
       };
 
   factory SessionHistoryItem.fromJson(Map<String, dynamic> json) {
     return SessionHistoryItem(
       url: json['url'] as String,
+      name: json['name'] as String? ?? 'Session', // fallback for legacy
+      firstConnected: DateTime.parse(json['firstConnected'] as String),
       lastConnected: DateTime.parse(json['lastConnected'] as String),
     );
   }
@@ -26,17 +37,43 @@ class SessionHistoryItem {
   static SessionHistoryItem? tryParse(String stored) {
     try {
       final map = jsonDecode(stored) as Map<String, dynamic>;
+      // Legacy migration: if fields missing, populate sensible defaults
+      if (!map.containsKey('name') || !map.containsKey('firstConnected')) {
+        final url = map['url'] as String;
+        final last = map['lastConnected'] != null
+            ? DateTime.parse(map['lastConnected'] as String)
+            : DateTime(2000, 1, 1);
+        final name = map['name'] as String? ?? url;
+        final first = map['firstConnected'] != null
+            ? DateTime.parse(map['firstConnected'] as String)
+            : last;
+        return SessionHistoryItem(
+          url: url,
+          name: name,
+          firstConnected: first,
+          lastConnected: last,
+        );
+      }
       return SessionHistoryItem.fromJson(map);
     } catch (_) {
+      // Handle plain string fallback
       final trimmed = stored.trim();
       if (trimmed.isNotEmpty) {
+        final now = DateTime.now();
         return SessionHistoryItem(
           url: trimmed,
-          lastConnected: DateTime(2000, 1, 1),
+          name: 'Session at ${_formatDateTime(now)}',
+          firstConnected: now,
+          lastConnected: now,
         );
       }
       return null;
     }
+  }
+
+  // Helper for default name formatting
+  static String _formatDateTime(DateTime dt) {
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 }
 
@@ -50,7 +87,6 @@ class SessionSelectionScreen extends StatefulWidget {
 
 class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     with RouteAware {
-
   List<SessionHistoryItem> _history = [];
   bool _isLoading = true;
 
@@ -63,7 +99,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Subscribe to the global observer
     final route = ModalRoute.of(context);
     if (route is PageRoute) {
       routeObserver.subscribe(this, route);
@@ -76,10 +111,9 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     super.dispose();
   }
 
-  // Called when we return to this screen (e.g. press back from live)
   @override
   void didPopNext() {
-    _loadHistory(); // reload the list
+    _loadHistory(); // refresh on return
   }
 
   // ---------- History loading / saving ----------
@@ -95,13 +129,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       if (item != null) items.add(item);
     }
 
-    bool needsMigration = items.any(
-      (item) => item.lastConnected == DateTime(2000, 1, 1),
-    );
-    if (needsMigration) {
-      await _saveHistory(items, skipSetState: true);
-    }
-
+    // Sort by lastConnected descending
     items.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
     setState(() {
       _history = items;
@@ -109,18 +137,13 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     });
   }
 
-  Future<void> _saveHistory(
-    List<SessionHistoryItem> newList, {
-    bool skipSetState = false,
-  }) async {
+  Future<void> _saveHistory(List<SessionHistoryItem> newList) async {
     final prefs = await SharedPreferences.getInstance();
     final jsonList = newList
         .map((item) => jsonEncode(item.toJson()))
         .toList();
     await prefs.setStringList('session_history', jsonList);
-    if (!skipSetState) {
-      setState(() => _history = newList);
-    }
+    setState(() => _history = newList);
   }
 
   // ---------- URL resolution ----------
@@ -180,29 +203,75 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       return;
     }
 
-    // Update timestamp
+    // Update or add session
+    final now = DateTime.now();
     final index = _history.indexWhere((item) => item.url == shortUrl);
+    List<SessionHistoryItem> newList;
     if (index != -1) {
+      // Update lastConnected only; keep name and firstConnected
       final updated = SessionHistoryItem(
         url: shortUrl,
-        lastConnected: DateTime.now(),
+        name: _history[index].name,
+        firstConnected: _history[index].firstConnected,
+        lastConnected: now,
+      );
+      newList = List<SessionHistoryItem>.from(_history);
+      newList[index] = updated;
+    } else {
+      // New session: default name = "Session at HH:MM"
+      final defaultName = 'Session at ${_formatTime(now)}';
+      final newItem = SessionHistoryItem(
+        url: shortUrl,
+        name: defaultName,
+        firstConnected: now,
+        lastConnected: now,
+      );
+      newList = List<SessionHistoryItem>.from(_history)..add(newItem);
+    }
+    await _saveHistory(newList);
+
+    if (mounted) {
+      Navigator.pop(context);
+      Navigator.pushNamed(context, '/live', arguments: resolvedUrl);
+    }
+  }
+
+  // ---------- Edit name ----------
+
+  Future<void> _editName(int index) async {
+    final item = _history[index];
+    final controller = TextEditingController(text: item.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Edit Session Name'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName != null && newName.isNotEmpty) {
+      final updated = SessionHistoryItem(
+        url: item.url,
+        name: newName,
+        firstConnected: item.firstConnected,
+        lastConnected: item.lastConnected,
       );
       final newList = List<SessionHistoryItem>.from(_history);
       newList[index] = updated;
       await _saveHistory(newList);
-    } else {
-      final newItem = SessionHistoryItem(
-        url: shortUrl,
-        lastConnected: DateTime.now(),
-      );
-      final newList = List<SessionHistoryItem>.from(_history)..add(newItem);
-      await _saveHistory(newList);
-    }
-
-    if (mounted) {
-      Navigator.pop(context);
-      // Push live screen
-      Navigator.pushNamed(context, '/live', arguments: resolvedUrl);
     }
   }
 
@@ -219,7 +288,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       context: context,
       builder: (context) => AlertDialog(
         title: const Text('Clear all sessions?'),
-        content: const Text('This will remove all saved URLs.'),
+        content: const Text('This will remove all saved URLs and names.'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -281,18 +350,38 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
                     return ListTile(
                       leading: const Icon(Icons.history),
                       title: Text(
-                        item.url,
+                        item.name,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w500),
                       ),
-                      subtitle: Text(
-                        'Last connected: ${_formatDateTime(item.lastConnected)}',
-                        style: const TextStyle(fontSize: 12),
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item.url,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                          Text(
+                            'Last connected: ${_formatDateTime(item.lastConnected)}',
+                            style: const TextStyle(fontSize: 12, color: Colors.grey),
+                          ),
+                        ],
                       ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.close, size: 20),
-                        onPressed: () => _deleteSession(index),
-                        tooltip: 'Remove',
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.edit, size: 20),
+                            onPressed: () => _editName(index),
+                            tooltip: 'Edit name',
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.close, size: 20),
+                            onPressed: () => _deleteSession(index),
+                            tooltip: 'Remove',
+                          ),
+                        ],
                       ),
                       onTap: () => _connectToSession(item.url),
                     );
