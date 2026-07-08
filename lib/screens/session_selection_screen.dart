@@ -1,15 +1,61 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+/// Represents a single session history entry.
+class SessionHistoryItem {
+  final String url;
+  final DateTime lastConnected;
+
+  SessionHistoryItem({required this.url, required this.lastConnected});
+
+  Map<String, dynamic> toJson() => {
+        'url': url,
+        'lastConnected': lastConnected.toIso8601String(),
+      };
+
+  factory SessionHistoryItem.fromJson(Map<String, dynamic> json) {
+    return SessionHistoryItem(
+      url: json['url'] as String,
+      lastConnected: DateTime.parse(json['lastConnected'] as String),
+    );
+  }
+
+  /// Attempt to parse a stored string, handling both old plain‑URL format
+  /// and the new JSON format. Returns null if parsing fails.
+  static SessionHistoryItem? tryParse(String stored) {
+    // Try JSON first
+    try {
+      final map = jsonDecode(stored) as Map<String, dynamic>;
+      return SessionHistoryItem.fromJson(map);
+    } catch (_) {
+      // Not JSON – treat as plain URL (old format)
+      final trimmed = stored.trim();
+      if (trimmed.isNotEmpty) {
+        // Assign a default timestamp (e.g., now, but we can use a fixed date)
+        // We'll use the current time when migrating, but better to use a
+        // conservative old date so that it appears at the bottom.
+        final defaultDate = DateTime(2000, 1, 1);
+        return SessionHistoryItem(
+          url: trimmed,
+          lastConnected: defaultDate,
+        );
+      }
+      return null;
+    }
+  }
+}
 
 class SessionSelectionScreen extends StatefulWidget {
   const SessionSelectionScreen({super.key});
 
   @override
-  State<SessionSelectionScreen> createState() => _SessionSelectionScreenState();
+  State<SessionSelectionScreen> createState() =>
+      _SessionSelectionScreenState();
 }
 
 class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
-  List<String> _history = [];
+  List<SessionHistoryItem> _history = [];
   bool _isLoading = true;
 
   @override
@@ -20,31 +66,76 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
 
   Future<void> _loadHistory() async {
     final prefs = await SharedPreferences.getInstance();
-    final list = prefs.getStringList('session_history') ?? [];
+    final storedList = prefs.getStringList('session_history') ?? [];
+    final List<SessionHistoryItem> items = [];
+
+    for (final entry in storedList) {
+      final item = SessionHistoryItem.tryParse(entry);
+      if (item != null) {
+        items.add(item);
+      }
+    }
+
+    // If the list contained old‑format entries, we should save them back in the new format.
+    // We'll detect if any entry was parsed as plain URL (its timestamp is the default)
+    // and resave the entire list as JSON.
+    bool needsMigration = items.any(
+      (item) => item.lastConnected == DateTime(2000, 1, 1),
+    );
+
+    if (needsMigration) {
+      // Save the migrated list (with new format) so next load is faster.
+      await _saveHistory(items, skipSetState: true);
+    }
+
+    // Sort by most recent first
+    items.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
+
     setState(() {
-      _history = list;
+      _history = items;
       _isLoading = false;
     });
   }
 
-  Future<void> _saveHistory(List<String> newList) async {
+  Future<void> _saveHistory(
+    List<SessionHistoryItem> newList, {
+    bool skipSetState = false,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList('session_history', newList);
-    setState(() {
-      _history = newList;
-    });
+    final jsonList = newList
+        .map((item) => jsonEncode(item.toJson()))
+        .toList();
+    await prefs.setStringList('session_history', jsonList);
+    if (!skipSetState) {
+      setState(() {
+        _history = newList;
+      });
+    }
   }
 
   void _connectToSession(String url) {
-    Navigator.pushReplacementNamed(
-      context,
-      '/live',
-      arguments: url,
-    );
+    final index = _history.indexWhere((item) => item.url == url);
+    if (index != -1) {
+      final updated = SessionHistoryItem(
+        url: url,
+        lastConnected: DateTime.now(),
+      );
+      final newList = List<SessionHistoryItem>.from(_history);
+      newList[index] = updated;
+      _saveHistory(newList);
+    } else {
+      final newItem = SessionHistoryItem(
+        url: url,
+        lastConnected: DateTime.now(),
+      );
+      final newList = List<SessionHistoryItem>.from(_history)..add(newItem);
+      _saveHistory(newList);
+    }
+    Navigator.pushNamed(context, '/live', arguments: url);
   }
 
   void _deleteSession(int index) {
-    final newList = List<String>.from(_history);
+    final newList = List<SessionHistoryItem>.from(_history);
     newList.removeAt(index);
     _saveHistory(newList);
   }
@@ -72,6 +163,21 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     }
   }
 
+  String _formatDateTime(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inDays == 0) {
+      return 'Today at ${_formatTime(dt)}';
+    } else if (diff.inDays == 1) {
+      return 'Yesterday at ${_formatTime(dt)}';
+    } else {
+      return '${dt.day}/${dt.month}/${dt.year} ${_formatTime(dt)}';
+    }
+  }
+
+  String _formatTime(DateTime dt) =>
+      '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -93,19 +199,23 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
               : ListView.builder(
                   itemCount: _history.length,
                   itemBuilder: (context, index) {
-                    final url = _history[index];
+                    final item = _history[index];
                     return ListTile(
-                      leading: const Icon(Icons.history), // ✅ FIXED: use 'history' (not 'history_off')
+                      leading: const Icon(Icons.history),
                       title: Text(
-                        url,
+                        item.url,
                         overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: Text(
+                        'Last connected: ${_formatDateTime(item.lastConnected)}',
+                        style: const TextStyle(fontSize: 12),
                       ),
                       trailing: IconButton(
                         icon: const Icon(Icons.close, size: 20),
                         onPressed: () => _deleteSession(index),
                         tooltip: 'Remove',
                       ),
-                      onTap: () => _connectToSession(url),
+                      onTap: () => _connectToSession(item.url),
                     );
                   },
                 ),
@@ -124,7 +234,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.history, size: 80, color: Colors.grey), // ✅ FIXED here too
+          Icon(Icons.history, size: 80, color: Colors.grey),
           SizedBox(height: 16),
           Text(
             'No previous sessions',
