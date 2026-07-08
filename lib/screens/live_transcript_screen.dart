@@ -21,8 +21,8 @@ class LiveTranscriptScreen extends StatefulWidget {
 class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String? _selectedLanguage; // null = show all
   final Set<String> _availableLanguages = {};
-  final List<TranscriptMessage> _messages = [];
-  bool _defaultFilterSet = false; // set once when first message arrives
+  final Map<String, TranscriptMessage> _messagesMap = {}; // key -> message
+  bool _defaultFilterSet = false;
 
   WebSocketChannel? _channel;
   StreamSubscription? _sseSubscription;
@@ -100,9 +100,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _errorMessage = null;
       _isConnected = false;
       _isConnecting = true;
-      _messages.clear();
+      _messagesMap.clear();
       _availableLanguages.clear();
-      _defaultFilterSet = false; // reset on reconnect
+      _defaultFilterSet = false;
       _selectedLanguage = null;
     });
 
@@ -236,36 +236,78 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── Language extraction from sender ────────────────────
+  // ─── Language extraction from sender (complete mapping) ────
   String _extractLanguageFromSender(String sender) {
-    // ASR sender → Transcript
-    if (sender.startsWith('asr')) {
-      return 'Transcript';
-    }
+    // Full mapping from your HTML
+    const Map<String, String> senderToLanguage = {
+      // ASR / Transcript
+      'asr:speakerdiarization': 'Transcript',
+      'textstructurer:0_mult8': 'Transcript',
+      'summarizer:0_mult8': 'Transcript',
+      'postproduction:90_mult8': 'Transcript',
+      // Chinese
+      'mt:0': 'Chinese',
+      'textstructurer:0_zh': 'Chinese',
+      'summarizer:0_zh': 'Chinese',
+      'postproduction:90_zh': 'Chinese',
+      'tts:0': 'Chinese Audio',
+      // English
+      'mt:1': 'English',
+      'textstructurer:0_en': 'English',
+      'summarizer:0_en': 'English',
+      'postproduction:90_en': 'English',
+      'tts:1': 'English Audio',
+      // French
+      'mt:2': 'French',
+      'textstructurer:0_fr': 'French',
+      'summarizer:0_fr': 'French',
+      'postproduction:90_fr': 'French',
+      'tts:2': 'French Audio',
+      // German
+      'mt:3': 'German',
+      'textstructurer:0_de': 'German',
+      'summarizer:0_de': 'German',
+      'postproduction:90_de': 'German',
+      'tts:3': 'German Audio',
+      // Italian
+      'mt:4': 'Italian',
+      'textstructurer:0_it': 'Italian',
+      'summarizer:0_it': 'Italian',
+      'postproduction:90_it': 'Italian',
+      'tts:4': 'Italian Audio',
+      // Japanese
+      'mt:5': 'Japanese',
+      'textstructurer:0_ja': 'Japanese',
+      'summarizer:0_ja': 'Japanese',
+      'postproduction:90_ja': 'Japanese',
+      'tts:5': 'Japanese Audio',
+      // Persian
+      'mt:6': 'Persian',
+      'textstructurer:0_fa': 'Persian',
+      'summarizer:0_fa': 'Persian',
+      'postproduction:90_fa': 'Persian',
+      'tts:6': 'Persian Audio',
+      // Russian
+      'mt:7': 'Russian',
+      'textstructurer:0_ru': 'Russian',
+      'summarizer:0_ru': 'Russian',
+      'postproduction:90_ru': 'Russian',
+      'tts:7': 'Russian Audio',
+      // Spanish
+      'mt:8': 'Spanish',
+      'textstructurer:0_es': 'Spanish',
+      'summarizer:0_es': 'Spanish',
+      'postproduction:90_es': 'Spanish',
+      'tts:8': 'Spanish Audio',
+      // Vietnamese
+      'mt:9': 'Vietnamese',
+      'textstructurer:0_vi': 'Vietnamese',
+      'summarizer:0_vi': 'Vietnamese',
+      'postproduction:90_vi': 'Vietnamese',
+      'tts:9': 'Vietnamese Audio',
+    };
 
-    // Try to extract language code from sender like "textstructurer:0_en"
-    final parts = sender.split('_');
-    if (parts.length > 1) {
-      final code = parts.last;
-      // Map common codes to display names
-      switch (code) {
-        case 'en': return 'English';
-        case 'de': return 'German';
-        case 'fr': return 'French';
-        case 'zh': return 'Chinese';
-        case 'it': return 'Italian';
-        case 'ja': return 'Japanese';
-        case 'fa': return 'Persian';
-        case 'ru': return 'Russian';
-        case 'es': return 'Spanish';
-        case 'vi': return 'Vietnamese';
-        default: return code.toUpperCase();
-      }
-    }
-
-    // Fallback: if sender starts with "mt:" we could map index to language,
-    // but it's simpler to return 'unknown'.
-    return 'unknown';
+    return senderToLanguage[sender] ?? sender;
   }
 
   // ─── Message handler ─────────────────────────────────────
@@ -279,7 +321,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       return;
     }
 
-    // Extract language from sender
     final sender = json['sender'] ?? '';
     final language = _extractLanguageFromSender(sender);
     _availableLanguages.add(language);
@@ -290,22 +331,58 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _defaultFilterSet = true;
     }
 
-    final message = TranscriptMessage(
-      transcript: transcriptText,
-      translations: {},
-      timestamp: DateTime.now(),
-      language: language,
-    );
+    final isUnstable = json['unstable'] == true;
+    final start = json['start']?.toString() ?? '';
+    final end = json['end']?.toString() ?? '';
 
-    _messages.add(message);
+    // Create a unique key for this message (sender + start + end)
+    final key = '$sender|$start|$end';
 
+    // If there's already a message with this key, replace it (stable overwrites unstable)
+    if (_messagesMap.containsKey(key)) {
+      final existing = _messagesMap[key]!;
+      // If the new one is stable and the existing is unstable, replace
+      if (!isUnstable && existing.isUnstable) {
+        _messagesMap[key] = TranscriptMessage(
+          transcript: transcriptText,
+          translations: {},
+          timestamp: DateTime.now(),
+          language: language,
+          isUnstable: isUnstable,
+        );
+        // Also update Firestore if desired
+      }
+      // If both are stable, we could ignore or replace – we'll just replace
+      else {
+        _messagesMap[key] = TranscriptMessage(
+          transcript: transcriptText,
+          translations: {},
+          timestamp: DateTime.now(),
+          language: language,
+          isUnstable: isUnstable,
+        );
+      }
+    } else {
+      // New message
+      final message = TranscriptMessage(
+        transcript: transcriptText,
+        translations: {},
+        timestamp: DateTime.now(),
+        language: language,
+        isUnstable: isUnstable,
+      );
+      _messagesMap[key] = message;
+    }
+
+    // Save to Firestore (only stable messages, or all? – we'll save all for now)
     if (_transcriptsRef != null) {
       try {
         await _transcriptsRef!.add({
-          'transcript': message.transcript,
-          'translations': message.translations,
-          'timestamp': Timestamp.fromDate(message.timestamp),
-          'language': message.language,
+          'transcript': transcriptText,
+          'translations': {},
+          'timestamp': Timestamp.fromDate(DateTime.now()),
+          'language': language,
+          'isUnstable': isUnstable,
         });
       } catch (e) {
         debugPrint('⚠️ Could not save to Firestore: $e');
@@ -317,14 +394,15 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _isConnecting = false;
     });
 
-    // TTS – speak only if filter matches (or all)
+    // TTS – speak only if stable and filter matches
     bool shouldSpeak = _ttsEnabled &&
-        message.transcript.isNotEmpty &&
-        !message.transcript.startsWith('{');
+        !isUnstable &&
+        transcriptText.isNotEmpty &&
+        !transcriptText.startsWith('{');
     if (shouldSpeak) {
       if (_selectedLanguage == null ||
-          message.language.toLowerCase() == _selectedLanguage!.toLowerCase()) {
-        await _flutterTts.speak(message.transcript);
+          language.toLowerCase() == _selectedLanguage!.toLowerCase()) {
+        await _flutterTts.speak(transcriptText);
       }
     }
   }
@@ -369,17 +447,20 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   // ─── Build ───────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    // Filter messages
+    // Get messages list, sorted by timestamp
+    final messagesList = _messagesMap.values.toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+
+    // Filter by language
     List<TranscriptMessage> filteredMessages;
     if (_selectedLanguage == null) {
-      filteredMessages = List.from(_messages);
+      filteredMessages = messagesList;
     } else {
-      filteredMessages = _messages
+      filteredMessages = messagesList
           .where((msg) =>
               msg.language.toLowerCase() == _selectedLanguage!.toLowerCase())
           .toList();
     }
-    filteredMessages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
     return Scaffold(
       appBar: AppBar(
@@ -402,7 +483,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 ..._availableLanguages.map((lang) {
                   return DropdownMenuItem<String>(
                     value: lang,
-                    child: Text(lang == 'unknown' ? 'Unknown' : lang),
+                    child: Text(lang),
                   );
                 }),
               ],
@@ -436,7 +517,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 if (_selectedLanguage != null) ...[
                   const SizedBox(width: 12),
                   Chip(
-                    label: Text('Filter: ${_selectedLanguage == 'unknown' ? 'Unknown' : _selectedLanguage}'),
+                    label: Text('Filter: $_selectedLanguage'),
                     backgroundColor: Colors.blue.shade100,
                     deleteIcon: const Icon(Icons.close, size: 16),
                     onDeleted: () {
@@ -470,9 +551,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             child: filteredMessages.isEmpty
                 ? Center(
                     child: Text(
-                      _messages.isEmpty
+                      _messagesMap.isEmpty
                           ? 'Waiting for transcript...'
-                          : 'No messages in ${_selectedLanguage == 'unknown' ? 'Unknown' : _selectedLanguage}',
+                          : 'No messages in $_selectedLanguage',
                     ),
                   )
                 : ListView.builder(
@@ -493,7 +574,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                                   Expanded(
                                     child: Text(
                                       msg.transcript,
-                                      style: const TextStyle(fontSize: 18),
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        color: msg.isUnstable ? Colors.red : Colors.black,
+                                      ),
                                     ),
                                   ),
                                   Text(
@@ -504,9 +588,14 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'Language: ${msg.language == 'unknown' ? 'Unknown' : msg.language}',
+                                'Language: ${msg.language}',
                                 style: const TextStyle(fontSize: 12, color: Colors.blueGrey),
                               ),
+                              if (msg.isUnstable)
+                                const Text(
+                                  '(unstable)',
+                                  style: TextStyle(fontSize: 10, color: Colors.red),
+                                ),
                             ],
                           ),
                         ),

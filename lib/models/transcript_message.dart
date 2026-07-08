@@ -2,13 +2,15 @@ class TranscriptMessage {
   final String transcript;
   final Map<String, String> translations;
   final DateTime timestamp;
-  final String language; // new
+  final String language;
+  final bool isUnstable;
 
   TranscriptMessage({
     required this.transcript,
-    required this.translations,
+    this.translations = const {},
     required this.timestamp,
-    this.language = 'unknown',
+    this.language = 'unknown',      // default fallback
+    this.isUnstable = false,
   });
 
   factory TranscriptMessage.fromJson(Map<String, dynamic> json) {
