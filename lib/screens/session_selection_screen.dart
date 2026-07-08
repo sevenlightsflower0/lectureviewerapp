@@ -1,8 +1,9 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
+import 'dart:developer' as developer;
 
-/// Represents a single session history entry.
 class SessionHistoryItem {
   final String url;
   final DateTime lastConnected;
@@ -21,24 +22,16 @@ class SessionHistoryItem {
     );
   }
 
-  /// Attempt to parse a stored string, handling both old plain‑URL format
-  /// and the new JSON format. Returns null if parsing fails.
   static SessionHistoryItem? tryParse(String stored) {
-    // Try JSON first
     try {
       final map = jsonDecode(stored) as Map<String, dynamic>;
       return SessionHistoryItem.fromJson(map);
     } catch (_) {
-      // Not JSON – treat as plain URL (old format)
       final trimmed = stored.trim();
       if (trimmed.isNotEmpty) {
-        // Assign a default timestamp (e.g., now, but we can use a fixed date)
-        // We'll use the current time when migrating, but better to use a
-        // conservative old date so that it appears at the bottom.
-        final defaultDate = DateTime(2000, 1, 1);
         return SessionHistoryItem(
           url: trimmed,
-          lastConnected: defaultDate,
+          lastConnected: DateTime(2000, 1, 1),
         );
       }
       return null;
@@ -71,26 +64,17 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
 
     for (final entry in storedList) {
       final item = SessionHistoryItem.tryParse(entry);
-      if (item != null) {
-        items.add(item);
-      }
+      if (item != null) items.add(item);
     }
 
-    // If the list contained old‑format entries, we should save them back in the new format.
-    // We'll detect if any entry was parsed as plain URL (its timestamp is the default)
-    // and resave the entire list as JSON.
     bool needsMigration = items.any(
       (item) => item.lastConnected == DateTime(2000, 1, 1),
     );
-
     if (needsMigration) {
-      // Save the migrated list (with new format) so next load is faster.
       await _saveHistory(items, skipSetState: true);
     }
 
-    // Sort by most recent first
     items.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
-
     setState(() {
       _history = items;
       _isLoading = false;
@@ -107,32 +91,96 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
         .toList();
     await prefs.setStringList('session_history', jsonList);
     if (!skipSetState) {
-      setState(() {
-        _history = newList;
-      });
+      setState(() => _history = newList);
     }
   }
 
-  void _connectToSession(String url) {
-    final index = _history.indexWhere((item) => item.url == url);
+  // ─── URL resolver (same as in QR scanner) ──────────────────
+
+  Future<String> _resolveUrl(String input) async {
+    input = input.trim();
+
+    if (input.startsWith('ws://') || input.startsWith('wss://')) {
+      return input;
+    }
+
+    if (!input.startsWith('http://') && !input.startsWith('https://')) {
+      throw Exception('Invalid URL format.');
+    }
+
+    final response = await http.get(Uri.parse(input));
+    if (response.statusCode != 200) {
+      throw Exception('Server returned HTTP ${response.statusCode}');
+    }
+
+    final body = response.body;
+    final sessionIdRegex = RegExp(r'window\.sessionId\s*=\s*"([^"]+)"');
+    final match = sessionIdRegex.firstMatch(body);
+    if (match == null) {
+      throw Exception('Could not find window.sessionId in the page.');
+    }
+    final sessionId = match.group(1)!;
+    developer.log('Resolved session ID: $sessionId');
+
+    final uri = Uri.parse(input);
+    return '${uri.scheme}://${uri.host}/webapi/stream?channel=$sessionId';
+  }
+
+  // ─── Connect to session ─────────────────────────────────────
+
+  Future<void> _connectToSession(String shortUrl) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(child: CircularProgressIndicator()),
+    );
+
+    String resolvedUrl;
+    try {
+      // If it's already a stream URL, use it directly (legacy)
+      if (shortUrl.contains('/stream?channel=')) {
+        resolvedUrl = shortUrl;
+      } else {
+        resolvedUrl = await _resolveUrl(shortUrl);
+      }
+    } catch (e) {
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to resolve: $e'), backgroundColor: Colors.red),
+        );
+      }
+      return;
+    }
+
+    // Update timestamp
+    final index = _history.indexWhere((item) => item.url == shortUrl);
     if (index != -1) {
       final updated = SessionHistoryItem(
-        url: url,
+        url: shortUrl,
         lastConnected: DateTime.now(),
       );
       final newList = List<SessionHistoryItem>.from(_history);
       newList[index] = updated;
-      _saveHistory(newList);
+      await _saveHistory(newList);
     } else {
+      // Should not happen, but add it
       final newItem = SessionHistoryItem(
-        url: url,
+        url: shortUrl,
         lastConnected: DateTime.now(),
       );
       final newList = List<SessionHistoryItem>.from(_history)..add(newItem);
-      _saveHistory(newList);
+      await _saveHistory(newList);
     }
-    Navigator.pushNamed(context, '/live', arguments: url);
+
+    if (mounted) {
+      Navigator.pop(context); // close loading
+      // Use pushNamed so the back arrow appears
+      Navigator.pushNamed(context, '/live', arguments: resolvedUrl);
+    }
   }
+
+  // ─── Delete / clear ─────────────────────────────────────────
 
   void _deleteSession(int index) {
     final newList = List<SessionHistoryItem>.from(_history);
@@ -203,8 +251,9 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
                     return ListTile(
                       leading: const Icon(Icons.history),
                       title: Text(
-                        item.url,
+                        item.url, // Full short link
                         overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w500),
                       ),
                       subtitle: Text(
                         'Last connected: ${_formatDateTime(item.lastConnected)}',

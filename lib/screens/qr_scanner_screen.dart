@@ -1,5 +1,6 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -41,33 +42,25 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     super.dispose();
   }
 
-  // ─── URL resolver: fetches session ID and builds SSE URL ──────────
+  // ─── URL resolver ──────────────────────────────────────────────
+
   Future<String> _resolveUrl(String input) async {
     input = input.trim();
 
-    // 1. Already a WebSocket URL? (backward compatibility)
     if (input.startsWith('ws://') || input.startsWith('wss://')) {
       return input;
     }
 
-    // 2. Must be an HTTP(S) URL to fetch.
     if (!input.startsWith('http://') && !input.startsWith('https://')) {
-      throw Exception(
-          'Invalid URL format. Please enter a ws://, wss://, http://, or https:// URL.');
+      throw Exception('Invalid URL format.');
     }
 
-    // 3. Fetch the HTML.
     final response = await http.get(Uri.parse(input));
     if (response.statusCode != 200) {
       throw Exception('Server returned HTTP ${response.statusCode}');
     }
 
-    String body = response.body;
-
-    // Debug: print first 500 chars.
-    developer.log('Raw response (first 500 chars): ${body.substring(0, body.length > 500 ? 500 : body.length)}');
-
-    // 4. Extract session ID from window.sessionId = "...";
+    final body = response.body;
     final sessionIdRegex = RegExp(r'window\.sessionId\s*=\s*"([^"]+)"');
     final match = sessionIdRegex.firstMatch(body);
     if (match == null) {
@@ -76,24 +69,51 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     final sessionId = match.group(1)!;
     developer.log('Extracted session ID: $sessionId');
 
-    // 5. Build the SSE (EventSource) URL – HTTP/HTTPS
     final uri = Uri.parse(input);
-    final host = uri.host;
-    final scheme = uri.scheme; // https
-    final sseUrl = '$scheme://$host/webapi/stream?channel=$sessionId';
-    developer.log('Constructed SSE URL: $sseUrl');
-    return sseUrl;
+    return '${uri.scheme}://${uri.host}/webapi/stream?channel=$sessionId';
   }
 
-  // ─── History helper ───────────────────────────────────────────────
-  Future<void> _addToHistory(String url) async {
+  // ─── History helper (uses same JSON format) ───────────────────
+
+  Future<void> _addToHistory(String rawUrl) async {
     final prefs = await SharedPreferences.getInstance();
-    List<String> history = prefs.getStringList('session_history') ?? [];
-    history.remove(url);
-    history.insert(0, url);
-    if (history.length > 20) history = history.sublist(0, 20);
-    await prefs.setStringList('session_history', history);
+    final storedList = prefs.getStringList('session_history') ?? [];
+
+    // Parse existing items
+    List<Map<String, dynamic>> items = [];
+    for (final entry in storedList) {
+      try {
+        final map = jsonDecode(entry) as Map<String, dynamic>;
+        items.add(map);
+      } catch (_) {
+        // Old plain string – convert to new format with default date
+        if (entry.trim().isNotEmpty) {
+          items.add({
+            'url': entry.trim(),
+            'lastConnected': DateTime(2000, 1, 1).toIso8601String(),
+          });
+        }
+      }
+    }
+
+    // Remove duplicate if exists
+    items.removeWhere((map) => map['url'] == rawUrl);
+
+    // Add new item with current timestamp
+    items.insert(0, {
+      'url': rawUrl,
+      'lastConnected': DateTime.now().toIso8601String(),
+    });
+
+    // Keep only last 20
+    if (items.length > 20) items = items.sublist(0, 20);
+
+    // Serialize back to JSON strings
+    final jsonList = items.map((map) => jsonEncode(map)).toList();
+    await prefs.setStringList('session_history', jsonList);
   }
+
+  // ─── Process scanned or manual input ──────────────────────────
 
   Future<void> _proceedWithUrl(String rawInput) async {
     if (rawInput.trim().isEmpty) return;
@@ -110,39 +130,36 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
       builder: (context) => const Center(child: CircularProgressIndicator()),
     );
 
-    String websocketUrl = '';
-
+    String resolvedUrl;
     try {
-      websocketUrl = await _resolveUrl(rawInput);
-      await _addToHistory(websocketUrl);
-
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('session_url', websocketUrl);
-
-      if (mounted) {
-        Navigator.pop(context);
-        Navigator.pushReplacementNamed(
-          context,
-          '/live',
-          arguments: websocketUrl,
-        );
-      }
+      resolvedUrl = await _resolveUrl(rawInput);
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text('Error resolving: $e'), backgroundColor: Colors.red),
         );
         await scannerController?.start();
         setState(() => _isProcessing = false);
       }
+      return;
+    }
+
+    // Store the raw input (short link) in history
+    await _addToHistory(rawInput);
+
+    if (mounted) {
+      Navigator.pop(context); // close loading dialog
+      Navigator.pushReplacementNamed(
+        context,
+        '/live',
+        arguments: resolvedUrl,
+      );
     }
   }
 
-  // ─── UI builders ──────────────────────────────────────────────────
+  // ─── UI ─────────────────────────────────────────────────────────
+
   Widget _buildManualEntryScreen() {
     final TextEditingController textController = TextEditingController();
 
