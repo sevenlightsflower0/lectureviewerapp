@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:developer' as developer;
+import '../route_observer.dart'; // <-- import the global observer
 
 class SessionHistoryItem {
   final String url;
@@ -47,7 +48,9 @@ class SessionSelectionScreen extends StatefulWidget {
       _SessionSelectionScreenState();
 }
 
-class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
+class _SessionSelectionScreenState extends State<SessionSelectionScreen>
+    with RouteAware {
+
   List<SessionHistoryItem> _history = [];
   bool _isLoading = true;
 
@@ -57,7 +60,32 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     _loadHistory();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Subscribe to the global observer
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      routeObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void dispose() {
+    routeObserver.unsubscribe(this);
+    super.dispose();
+  }
+
+  // Called when we return to this screen (e.g. press back from live)
+  @override
+  void didPopNext() {
+    _loadHistory(); // reload the list
+  }
+
+  // ---------- History loading / saving ----------
+
   Future<void> _loadHistory() async {
+    setState(() => _isLoading = true);
     final prefs = await SharedPreferences.getInstance();
     final storedList = prefs.getStringList('session_history') ?? [];
     final List<SessionHistoryItem> items = [];
@@ -95,7 +123,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     }
   }
 
-  // ─── URL resolver (same as in QR scanner) ──────────────────
+  // ---------- URL resolution ----------
 
   Future<String> _resolveUrl(String input) async {
     input = input.trim();
@@ -126,7 +154,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     return '${uri.scheme}://${uri.host}/webapi/stream?channel=$sessionId';
   }
 
-  // ─── Connect to session ─────────────────────────────────────
+  // ---------- Connect to session ----------
 
   Future<void> _connectToSession(String shortUrl) async {
     showDialog(
@@ -137,7 +165,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
 
     String resolvedUrl;
     try {
-      // If it's already a stream URL, use it directly (legacy)
       if (shortUrl.contains('/stream?channel=')) {
         resolvedUrl = shortUrl;
       } else {
@@ -164,7 +191,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
       newList[index] = updated;
       await _saveHistory(newList);
     } else {
-      // Should not happen, but add it
       final newItem = SessionHistoryItem(
         url: shortUrl,
         lastConnected: DateTime.now(),
@@ -174,13 +200,13 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     }
 
     if (mounted) {
-      Navigator.pop(context); // close loading
-      // Use pushNamed so the back arrow appears
+      Navigator.pop(context);
+      // Push live screen
       Navigator.pushNamed(context, '/live', arguments: resolvedUrl);
     }
   }
 
-  // ─── Delete / clear ─────────────────────────────────────────
+  // ---------- Delete / clear ----------
 
   void _deleteSession(int index) {
     final newList = List<SessionHistoryItem>.from(_history);
@@ -211,6 +237,8 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
     }
   }
 
+  // ---------- Formatting ----------
+
   String _formatDateTime(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -225,6 +253,8 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
 
   String _formatTime(DateTime dt) =>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+
+  // ---------- Build ----------
 
   @override
   Widget build(BuildContext context) {
@@ -251,7 +281,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen> {
                     return ListTile(
                       leading: const Icon(Icons.history),
                       title: Text(
-                        item.url, // Full short link
+                        item.url,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w500),
                       ),

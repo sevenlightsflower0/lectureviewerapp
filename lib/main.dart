@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:firebase_core/firebase_core.dart';
 import 'screens/qr_scanner_screen.dart';
 import 'screens/live_transcript_screen.dart';
+import 'route_observer.dart'; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,6 +56,7 @@ class MyApp extends StatelessWidget {
       title: 'ASR Live Translator',
       theme: ThemeData(useMaterial3: true),
       initialRoute: '/',
+      navigatorObservers: [routeObserver],
       routes: {
         '/': (context) => const SessionSelectionScreen(),
         '/scan': (context) => const QRScannerScreen(),
