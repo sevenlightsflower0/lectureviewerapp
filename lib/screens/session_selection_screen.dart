@@ -5,11 +5,12 @@ import 'package:http/http.dart' as http;
 import 'dart:developer' as developer;
 import '../route_observer.dart';
 
+// ========== SessionHistoryItem ==========
 class SessionHistoryItem {
   final String url;
-  String name;                // editable display name
-  final DateTime firstConnected; // first connection date
-  DateTime lastConnected;     // last connection date (for sorting)
+  String name;                // editable; default = formatted firstConnected
+  final DateTime firstConnected;
+  DateTime lastConnected;     // used for sorting
 
   SessionHistoryItem({
     required this.url,
@@ -28,7 +29,7 @@ class SessionHistoryItem {
   factory SessionHistoryItem.fromJson(Map<String, dynamic> json) {
     return SessionHistoryItem(
       url: json['url'] as String,
-      name: json['name'] as String? ?? 'Session', // fallback for legacy
+      name: json['name'] as String? ?? 'Session',
       firstConnected: DateTime.parse(json['firstConnected'] as String),
       lastConnected: DateTime.parse(json['lastConnected'] as String),
     );
@@ -37,16 +38,16 @@ class SessionHistoryItem {
   static SessionHistoryItem? tryParse(String stored) {
     try {
       final map = jsonDecode(stored) as Map<String, dynamic>;
-      // Legacy migration: if fields missing, populate sensible defaults
+      // Legacy migration
       if (!map.containsKey('name') || !map.containsKey('firstConnected')) {
         final url = map['url'] as String;
         final last = map['lastConnected'] != null
             ? DateTime.parse(map['lastConnected'] as String)
             : DateTime(2000, 1, 1);
-        final name = map['name'] as String? ?? url;
         final first = map['firstConnected'] != null
             ? DateTime.parse(map['firstConnected'] as String)
             : last;
+        final name = _formatDateForName(first);
         return SessionHistoryItem(
           url: url,
           name: name,
@@ -56,13 +57,12 @@ class SessionHistoryItem {
       }
       return SessionHistoryItem.fromJson(map);
     } catch (_) {
-      // Handle plain string fallback
       final trimmed = stored.trim();
       if (trimmed.isNotEmpty) {
         final now = DateTime.now();
         return SessionHistoryItem(
           url: trimmed,
-          name: 'Session at ${_formatDateTime(now)}',
+          name: _formatDateForName(now),
           firstConnected: now,
           lastConnected: now,
         );
@@ -71,12 +71,13 @@ class SessionHistoryItem {
     }
   }
 
-  // Helper for default name formatting
-  static String _formatDateTime(DateTime dt) {
-    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  static String _formatDateForName(DateTime dt) {
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 }
 
+// ========== Screen ==========
 class SessionSelectionScreen extends StatefulWidget {
   const SessionSelectionScreen({super.key});
 
@@ -113,11 +114,10 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
 
   @override
   void didPopNext() {
-    _loadHistory(); // refresh on return
+    _loadHistory();
   }
 
   // ---------- History loading / saving ----------
-
   Future<void> _loadHistory() async {
     setState(() => _isLoading = true);
     final prefs = await SharedPreferences.getInstance();
@@ -129,8 +129,9 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       if (item != null) items.add(item);
     }
 
-    // Sort by lastConnected descending
+    // ✅ SORT BY LAST CONNECTED (most recent first)
     items.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
+
     setState(() {
       _history = items;
       _isLoading = false;
@@ -138,6 +139,8 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   }
 
   Future<void> _saveHistory(List<SessionHistoryItem> newList) async {
+    // Sort by lastConnected before saving, to keep order consistent
+    newList.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
     final prefs = await SharedPreferences.getInstance();
     final jsonList = newList
         .map((item) => jsonEncode(item.toJson()))
@@ -147,7 +150,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   }
 
   // ---------- URL resolution ----------
-
   Future<String> _resolveUrl(String input) async {
     input = input.trim();
 
@@ -178,7 +180,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   }
 
   // ---------- Connect to session ----------
-
   Future<void> _connectToSession(String shortUrl) async {
     showDialog(
       context: context,
@@ -203,12 +204,11 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       return;
     }
 
-    // Update or add session
     final now = DateTime.now();
     final index = _history.indexWhere((item) => item.url == shortUrl);
     List<SessionHistoryItem> newList;
     if (index != -1) {
-      // Update lastConnected only; keep name and firstConnected
+      // Update lastConnected, keep name and firstConnected
       final updated = SessionHistoryItem(
         url: shortUrl,
         name: _history[index].name,
@@ -218,8 +218,8 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       newList = List<SessionHistoryItem>.from(_history);
       newList[index] = updated;
     } else {
-      // New session: default name = "Session at HH:MM"
-      final defaultName = 'Session at ${_formatTime(now)}';
+      // New session: default name = formatted firstConnected date/time
+      final defaultName = _formatDateForName(now);
       final newItem = SessionHistoryItem(
         url: shortUrl,
         name: defaultName,
@@ -228,6 +228,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       );
       newList = List<SessionHistoryItem>.from(_history)..add(newItem);
     }
+    // Saving will re‑sort by lastConnected
     await _saveHistory(newList);
 
     if (mounted) {
@@ -236,8 +237,12 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     }
   }
 
-  // ---------- Edit name ----------
+  String _formatDateForName(DateTime dt) {
+    return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+  }
 
+  // ---------- Edit name ----------
   Future<void> _editName(int index) async {
     final item = _history[index];
     final controller = TextEditingController(text: item.name);
@@ -271,12 +276,12 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       );
       final newList = List<SessionHistoryItem>.from(_history);
       newList[index] = updated;
+      // Saving will re‑sort by lastConnected
       await _saveHistory(newList);
     }
   }
 
   // ---------- Delete / clear ----------
-
   void _deleteSession(int index) {
     final newList = List<SessionHistoryItem>.from(_history);
     newList.removeAt(index);
@@ -306,8 +311,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     }
   }
 
-  // ---------- Formatting ----------
-
+  // ---------- Formatting for last‑connected display ----------
   String _formatDateTime(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -324,7 +328,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
 
   // ---------- Build ----------
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -350,7 +353,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
                     return ListTile(
                       leading: const Icon(Icons.history),
                       title: Text(
-                        item.name,
+                        item.name, // first line: editable name
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w500),
                       ),
@@ -358,12 +361,12 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            item.url,
+                            item.url, // second line: URL
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(fontSize: 12),
                           ),
                           Text(
-                            'Last connected: ${_formatDateTime(item.lastConnected)}',
+                            'Last connected: ${_formatDateTime(item.lastConnected)}', // third line
                             style: const TextStyle(fontSize: 12, color: Colors.grey),
                           ),
                         ],
