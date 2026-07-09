@@ -1,5 +1,3 @@
-// ignore_for_file: use_build_context_synchronously
-
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
@@ -124,6 +122,8 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
       await scannerController!.stop();
     }
 
+    if (!mounted) return;
+    // Show loading dialog – we guard later uses with mounted checks
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -134,8 +134,9 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     try {
       resolvedUrl = await _resolveUrl(rawInput);
     } catch (e) {
+      // Only interact with UI if still mounted
       if (mounted) {
-        Navigator.pop(context);
+        Navigator.pop(context); // close loading dialog
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error resolving: $e'), backgroundColor: Colors.red),
         );
@@ -148,6 +149,7 @@ class _QRScannerScreenState extends State<QRScannerScreen> {
     // Store the raw input (short link) in history
     await _addToHistory(rawInput);
 
+    // Navigate away only if still mounted
     if (mounted) {
       Navigator.pop(context); // close loading dialog
       Navigator.pushReplacementNamed(

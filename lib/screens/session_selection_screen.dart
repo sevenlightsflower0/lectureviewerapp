@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:developer' as developer;
+import 'package:wakelock/wakelock.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import '../route_observer.dart';
 
 // ========== SessionHistoryItem ==========
@@ -76,6 +78,10 @@ class SessionHistoryItem {
   }
 }
 
+// ========== Settings Keys ==========
+const String _kThemeModeKey = 'theme_mode';
+const String _kKeepScreenOnKey = 'keep_screen_on';
+
 // ========== Screen ==========
 class SessionSelectionScreen extends StatefulWidget {
   const SessionSelectionScreen({super.key});
@@ -93,10 +99,15 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   // Selection state – always active
   final Set<int> _selectedIndices = {};
 
+  // Settings state
+  String _themeMode = 'system';
+  bool _keepScreenOn = false;
+
   @override
   void initState() {
     super.initState();
     _loadHistory();
+    _loadSettings();
   }
 
   @override
@@ -119,6 +130,37 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     _loadHistory();
   }
 
+  // ---------- Settings loading / saving ----------
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _themeMode = prefs.getString(_kThemeModeKey) ?? 'system';
+      _keepScreenOn = prefs.getBool(_kKeepScreenOnKey) ?? false;
+    });
+    if (_keepScreenOn) {
+      await Wakelock.enable();
+    } else {
+      await Wakelock.disable();
+    }
+  }
+
+  Future<void> _saveThemeMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_kThemeModeKey, mode);
+    setState(() => _themeMode = mode);
+  }
+
+  Future<void> _saveKeepScreenOn(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_kKeepScreenOnKey, value);
+    setState(() => _keepScreenOn = value);
+    if (value) {
+      await Wakelock.enable();
+    } else {
+      await Wakelock.disable();
+    }
+  }
+
   // ---------- History loading / saving ----------
   Future<void> _loadHistory() async {
     setState(() => _isLoading = true);
@@ -131,13 +173,11 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       if (item != null) items.add(item);
     }
 
-    // Sort by lastConnected (most recent first)
     items.sort((a, b) => b.lastConnected.compareTo(a.lastConnected));
 
     setState(() {
       _history = items;
       _isLoading = false;
-      // Reset selection when loading
       _selectedIndices.clear();
     });
   }
@@ -322,13 +362,12 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     );
     if (confirm != true) return;
 
-    // Remove selected indices (descending order to avoid shifting)
     final sorted = _selectedIndices.toList()..sort((a, b) => b.compareTo(a));
     final newList = List<SessionHistoryItem>.from(_history);
     for (var idx in sorted) {
       newList.removeAt(idx);
     }
-    await _saveHistory(newList); // also resets selection
+    await _saveHistory(newList);
   }
 
   Future<void> _deleteAll() async {
@@ -353,6 +392,21 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     await _saveHistory([]);
   }
 
+  // ---------- Settings Dialog ----------
+  Future<void> _showSettingsDialog() async {
+    return showDialog(
+      context: context,
+      builder: (context) => _SettingsDialog(
+        initialTheme: _themeMode,
+        initialKeepOn: _keepScreenOn,
+        onSave: (theme, keepOn) async {
+          await _saveThemeMode(theme);
+          await _saveKeepScreenOn(keepOn);
+        },
+      ),
+    );
+  }
+
   // ---------- Formatting for display ----------
   String _formatDateTime(DateTime dt) {
     final now = DateTime.now();
@@ -374,6 +428,13 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.qr_code_scanner),
+          onPressed: () {
+            Navigator.pushNamed(context, '/scan');
+          },
+          tooltip: 'Scan New QR',
+        ),
         title: _selectedIndices.isNotEmpty
             ? Text('${_selectedIndices.length} selected')
             : const Text('Select Session'),
@@ -395,6 +456,11 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
                 child: Text('Delete All'),
               ),
             ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _showSettingsDialog,
+            tooltip: 'Settings',
           ),
         ],
       ),
@@ -450,13 +516,6 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
                     );
                   },
                 ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          Navigator.pushNamed(context, '/scan');
-        },
-        icon: const Icon(Icons.qr_code_scanner),
-        label: const Text('Scan New QR'),
-      ),
     );
   }
 
@@ -473,11 +532,120 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
           ),
           SizedBox(height: 8),
           Text(
-            'Tap the button below to scan a QR code.',
+            'Tap the QR scan icon in the top left to add a session.',
             style: TextStyle(color: Colors.grey),
           ),
         ],
       ),
     );
+  }
+}
+
+// ========== Settings Dialog Widget ==========
+class _SettingsDialog extends StatefulWidget {
+  final String initialTheme;
+  final bool initialKeepOn;
+  final Future<void> Function(String theme, bool keepOn) onSave;
+
+  const _SettingsDialog({
+    required this.initialTheme,
+    required this.initialKeepOn,
+    required this.onSave,
+  });
+
+  @override
+  State<_SettingsDialog> createState() => _SettingsDialogState();
+}
+
+class _SettingsDialogState extends State<_SettingsDialog> {
+  late String _tempTheme;
+  late bool _tempKeepOn;
+  String _appVersion = 'loading...';
+
+  @override
+  void initState() {
+    super.initState();
+    _tempTheme = widget.initialTheme;
+    _tempKeepOn = widget.initialKeepOn;
+    _loadVersion();
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() => _appVersion = info.version);
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _appVersion = 'unknown');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Settings'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Theme', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            // SegmentedButton for theme selection
+            SegmentedButton<String>(
+              segments: const [
+                ButtonSegment(value: 'light', label: Text('Light')),
+                ButtonSegment(value: 'dark', label: Text('Dark')),
+                ButtonSegment(value: 'system', label: Text('System')),
+              ],
+              selected: {_tempTheme},
+              onSelectionChanged: (Set<String> newSelection) {
+                setState(() {
+                  _tempTheme = newSelection.first;
+                });
+              },
+            ),
+            const SizedBox(height: 16),
+            const Divider(),
+            const Text('Device', style: TextStyle(fontWeight: FontWeight.bold)),
+            SwitchListTile(
+              title: const Text('Keep Screen On'),
+              value: _tempKeepOn,
+              onChanged: (value) {
+                setState(() => _tempKeepOn = value);
+              },
+            ),
+            const Divider(),
+            const SizedBox(height: 8),
+            Center(
+              child: Text(
+                'Version $_appVersion',
+                style: const TextStyle(color: Colors.grey),
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        ElevatedButton(
+          onPressed: _save,
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _save() async {
+    await widget.onSave(_tempTheme, _tempKeepOn);
+    if (mounted) {
+      Navigator.pop(context);
+    }
   }
 }

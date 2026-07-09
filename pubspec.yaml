@@ -13,6 +13,8 @@ dependencies:
   http: ^1.3.0
   web_socket_channel: ^2.4.0
   shared_preferences: ^2.2.2
+  wakelock: ^0.4.0          # for Keep Screen On
+  package_info_plus: ^4.0.0 # for version info
   firebase_core: ^4.11.0
   firebase_auth: ^6.5.4
   cloud_firestore: ^6.6.0
