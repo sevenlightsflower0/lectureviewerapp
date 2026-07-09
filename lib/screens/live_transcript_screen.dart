@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, kDebugMode;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -53,6 +53,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   @override
   void initState() {
     super.initState();
+    if (kDebugMode) {
+      print('🔗 SSE URL: ${widget.initialUrl}');
+    }   // 👈 This will show in browser DevTools console
     _initTts();
     _initFirebaseAndSession();
   }
