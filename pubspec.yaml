@@ -20,8 +20,9 @@ dependencies:
   cloud_firestore: ^6.6.0
   flutter_tts: ^4.2.5
   share_plus: ^7.2.1          # For sharing files
-  path_provider: ^2.1.0       # For getting temporary directory
-  pdf: ^3.10.4                # For generating PDFs
+  path_provider: ^2.1.0       # For getting temporary directory 
+  html: ^0.15.4     # for parsing HTML
+  pdf: ^3.10.4
   printing: ^5.11.1           # For PDF generation support
 
 dev_dependencies:
@@ -31,3 +32,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/fonts/NotoSans-Regular.ttf
