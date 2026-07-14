@@ -12,7 +12,7 @@ import '../models/transcript_message.dart';
 
 class LiveTranscriptScreen extends StatefulWidget {
   final String resolvedUrl;
-  final String? originalUrl; // the short HTML page URL (for fetching language mappings)
+  final String? originalUrl;
 
   const LiveTranscriptScreen({
     super.key,
@@ -25,12 +25,11 @@ class LiveTranscriptScreen extends StatefulWidget {
 }
 
 class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
-  String? _selectedLanguage; // null = show all
+  String? _selectedLanguage;
   final Set<String> _availableLanguages = {};
-  final Map<String, TranscriptMessage> _messagesMap = {}; // key -> message
+  final Map<String, TranscriptMessage> _messagesMap = {};
   bool _defaultFilterSet = false;
 
-  // Dynamic sender -> language mapping (fetched from data-sender)
   Map<String, String>? _senderToLanguage;
 
   WebSocketChannel? _channel;
@@ -39,11 +38,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String? _errorMessage;
   bool _isConnecting = false;
 
-  // TTS
   final FlutterTts _flutterTts = FlutterTts();
   bool _ttsEnabled = true;
 
-  // Firestore
   CollectionReference? _transcriptsRef;
   String _sessionId = '';
 
@@ -104,18 +101,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _sessionId = 'temp_${DateTime.now().millisecondsSinceEpoch}';
     }
 
-    // Fetch dynamic language mapping from the session HTML before connecting
     await _fetchLanguageMapping();
-
-    // Now connect with the resolved WebSocket/SSE URL
     _connect(widget.resolvedUrl);
   }
 
-  // ─── Fetch dynamic language mapping from the session page ──────────────
   Future<void> _fetchLanguageMapping() async {
     if (widget.originalUrl == null ||
         !widget.originalUrl!.startsWith('http')) {
-      // No HTML page available, leave _senderToLanguage as null
       return;
     }
 
@@ -127,7 +119,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
       final body = response.body;
 
-      // ---- Extract data-sender ----
       final senderRegex = RegExp(r'data-sender="([^"]+)"');
       final senderMatch = senderRegex.firstMatch(body);
       if (senderMatch != null) {
@@ -136,22 +127,18 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         _senderToLanguage = map.map((k, v) => MapEntry(k, v.toString()));
       }
 
-      // ---- Extract data-lang-name (for dropdown pre-population) ----
       final langNameRegex = RegExp(r'data-lang-name="([^"]+)"');
       final langNameMatch = langNameRegex.firstMatch(body);
       if (langNameMatch != null) {
         final raw = langNameMatch.group(1)!.replaceAll('&quot;', '"');
         final Map<String, dynamic> map = jsonDecode(raw);
-        // map is like {"1":"Transcript","2":"Arabic Audio",...}
         for (final entry in map.entries) {
           final name = entry.value.toString();
-          // Only add text languages (exclude Audio and Correction)
           if (!name.contains('Audio') && !name.contains('Correction')) {
             _availableLanguages.add(name);
           }
         }
 
-        // Set default filter if not already set
         if (!_defaultFilterSet && _availableLanguages.isNotEmpty) {
           _selectedLanguage = _availableLanguages.contains('Transcript')
               ? 'Transcript'
@@ -164,14 +151,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── Connection dispatcher ───────────────────────────────
   void _connect(String url) {
     setState(() {
       _errorMessage = null;
       _isConnected = false;
       _isConnecting = true;
       _messagesMap.clear();
-      // Do NOT clear _availableLanguages here; we keep the pre‑populated list.
       _defaultFilterSet = false;
       _selectedLanguage = null;
     });
@@ -183,7 +168,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── Manual SSE client ───────────────────────────────────
   void _connectSSE(String url) {
     debugPrint('🔗 Connecting to SSE: $url');
 
@@ -264,7 +248,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── WebSocket connection (fallback) ────────────────────
   void _connectWebSocket(String url) {
     debugPrint('🔗 Connecting to WebSocket: $url');
 
@@ -306,21 +289,24 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── Language extraction (dynamic only, no hardcoded fallback) ──────
   String _extractLanguageFromSender(String sender) {
     if (_senderToLanguage != null && _senderToLanguage!.containsKey(sender)) {
       return _senderToLanguage![sender]!;
     }
-    // No mapping found – return the raw sender ID (which will be shown as language)
     return sender;
   }
 
-  // ─── Message handler ─────────────────────────────────────
+  String _cleanTranscript(String raw) {
+    return raw.replaceAll(RegExp(r'<[^>]*>'), ' ');
+  }
+
   Future<void> _handleMessage(Map<String, dynamic> json) async {
     debugPrint('📩 JSON keys: ${json.keys}');
     debugPrint('🔍 sender: "${json['sender']}"');
 
     String transcriptText = (json['seq'] ?? '').toString().trim();
+    transcriptText = _cleanTranscript(transcriptText);
+
     if (transcriptText.isEmpty) {
       debugPrint('⏭️ Skipping message with empty seq');
       return;
@@ -329,12 +315,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     final sender = json['sender'] ?? '';
     final language = _extractLanguageFromSender(sender);
 
-    // Only add text languages (not Audio, not Correction) to the dropdown
     if (!language.contains('Audio') && !language.contains('Correction')) {
       _availableLanguages.add(language);
     }
 
-    // Set default filter to the first text language (usually 'Transcript')
     if (!_defaultFilterSet && !language.contains('Audio') && !language.contains('Correction')) {
       _selectedLanguage = language;
       _defaultFilterSet = true;
@@ -342,45 +326,27 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     final isUnstable = json['unstable'] == true;
     final start = json['start']?.toString() ?? '';
-    final end = json['end']?.toString() ?? '';
 
-    // Create a unique key for this message (sender + start + end)
-    final key = '$sender|$start|$end';
-
-    // Replace logic: new stable overwrites unstable
-    if (_messagesMap.containsKey(key)) {
-      final existing = _messagesMap[key]!;
-      if (!isUnstable && existing.isUnstable) {
-        _messagesMap[key] = TranscriptMessage(
-          transcript: transcriptText,
-          translations: {},
-          timestamp: DateTime.now(),
-          language: language,
-          isUnstable: isUnstable,
-        );
-      } else {
-        // Replace anyway (both stable or both unstable)
-        _messagesMap[key] = TranscriptMessage(
-          transcript: transcriptText,
-          translations: {},
-          timestamp: DateTime.now(),
-          language: language,
-          isUnstable: isUnstable,
-        );
-      }
+    // Use only sender + start for stable/unstable replacement
+    String key;
+    if (start.isNotEmpty) {
+      key = '$sender|$start';
     } else {
-      // New message
-      final message = TranscriptMessage(
-        transcript: transcriptText,
-        translations: {},
-        timestamp: DateTime.now(),
-        language: language,
-        isUnstable: isUnstable,
-      );
-      _messagesMap[key] = message;
+      final textPrefix = transcriptText.length > 20
+          ? transcriptText.substring(0, 20)
+          : transcriptText;
+      key = '$sender|$textPrefix';
     }
 
-    // Save to Firestore
+    // Replace existing message if key exists (stable overwrites unstable)
+    _messagesMap[key] = TranscriptMessage(
+      transcript: transcriptText,
+      translations: {},
+      timestamp: DateTime.now(),
+      language: language,
+      isUnstable: isUnstable,
+    );
+
     if (_transcriptsRef != null) {
       try {
         await _transcriptsRef!.add({
@@ -400,7 +366,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _isConnecting = false;
     });
 
-    // TTS – speak only if stable, filter matches, and not audio/Correction
     bool shouldSpeak = _ttsEnabled &&
         !isUnstable &&
         transcriptText.isNotEmpty &&
@@ -415,7 +380,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
   }
 
-  // ─── Helpers ────────────────────────────────────────────
   void _reconnect() {
     _channel?.sink.close();
     _sseSubscription?.cancel();
@@ -452,14 +416,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     super.dispose();
   }
 
-  // ─── Build ───────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
-    // Get messages list, sorted by timestamp
     final messagesList = _messagesMap.values.toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
-    // Filter by language
     List<TranscriptMessage> filteredMessages;
     if (_selectedLanguage == null) {
       filteredMessages = messagesList;
@@ -584,7 +545,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                                       msg.transcript,
                                       style: TextStyle(
                                         fontSize: 18,
-                                        color: msg.isUnstable ? Colors.red : Colors.black,
+                                        color: msg.isUnstable ? Colors.grey : Colors.black,
                                       ),
                                     ),
                                   ),
@@ -602,7 +563,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               if (msg.isUnstable)
                                 const Text(
                                   '(unstable)',
-                                  style: TextStyle(fontSize: 10, color: Colors.red),
+                                  style: TextStyle(fontSize: 10, color: Colors.grey),
                                 ),
                             ],
                           ),
