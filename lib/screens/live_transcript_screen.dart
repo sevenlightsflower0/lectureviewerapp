@@ -319,11 +319,12 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     debugPrint('📩 JSON keys: ${json.keys}');
     debugPrint('🔍 sender: "${json['sender']}"');
 
-    String transcriptText = (json['seq'] ?? '').toString().trim();
+    // ✅ Support 'text' field (and fallback to 'seq')
+    String transcriptText = (json['text'] ?? json['seq'] ?? '').toString().trim();
     transcriptText = _cleanTranscript(transcriptText);
 
     if (transcriptText.isEmpty) {
-      debugPrint('⏭️ Skipping message with empty seq');
+      debugPrint('⏭️ Skipping message with empty text/seq');
       return;
     }
 
@@ -402,9 +403,38 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   }
 
   Future<void> _toggleTts() async {
-    setState(() => _ttsEnabled = !_ttsEnabled);
-    if (!_ttsEnabled) {
+    // If TTS is currently enabled, just turn it off and stop.
+    if (_ttsEnabled) {
+      setState(() => _ttsEnabled = false);
       await _flutterTts.stop();
+      return;
+    }
+
+    // If TTS is OFF, turn it ON and read the current screen text.
+    setState(() => _ttsEnabled = true);
+    
+    // Get the current filtered messages (same logic as in build)
+    final messagesList = _messagesMap.values.toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+      
+    List<TranscriptMessage> filteredMessages;
+    if (_selectedLanguage == null) {
+      filteredMessages = messagesList;
+    } else {
+      filteredMessages = messagesList
+          .where((msg) => msg.language.toLowerCase() == _selectedLanguage!.toLowerCase())
+          .toList();
+    }
+
+    // Join all transcripts into one continuous text
+    String fullText = filteredMessages.map((msg) => msg.transcript).join(' ');
+    
+    if (fullText.isNotEmpty) {
+      // Optional: set language based on the first message
+      if (filteredMessages.isNotEmpty) {
+        await _flutterTts.setLanguage(filteredMessages.first.language);
+      }
+      await _flutterTts.speak(fullText);
     }
   }
 
