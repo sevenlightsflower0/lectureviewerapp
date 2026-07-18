@@ -19,6 +19,7 @@ dependencies:
   firebase_auth: ^6.5.4
   cloud_firestore: ^6.6.0
   flutter_tts: ^4.2.5
+  audioplayers: ^5.2.0
   share_plus: ^7.2.1          # For sharing files
   path_provider: ^2.1.0       # For getting temporary directory 
   html: ^0.15.4     # for parsing HTML

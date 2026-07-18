@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, kDebugMode;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
+import 'package:audioplayers/audioplayers.dart';
 import '../models/transcript_message.dart';
 
 class LiveTranscriptScreen extends StatefulWidget {
@@ -38,14 +39,18 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String? _errorMessage;
   bool _isConnecting = false;
 
-  final FlutterTts _flutterTts = FlutterTts();
-  bool _ttsEnabled = true;
-
   CollectionReference? _transcriptsRef;
   String _sessionId = '';
 
   // Scroll controller for auto‑scroll
   final ScrollController _scrollController = ScrollController();
+
+  // Audio player and playback state
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  String? _playingKey;               // key of the message currently playing
+  bool _isAudioPlaying = false;
+  final Map<String, double> _progressMap = {};   // key → progress (0.0–1.0)
+  final Map<String, Duration> _durationMap = {}; // key → total duration
 
   bool get _isDesktop {
     if (kIsWeb) return false;
@@ -65,14 +70,50 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     if (kDebugMode) {
       print('🔗 SSE URL: ${widget.resolvedUrl}');
     }
-    _initTts();
     _initFirebaseAndSession();
+    _setupAudioListeners();
   }
 
-  Future<void> _initTts() async {
-    await _flutterTts.setLanguage("en-US");
-    await _flutterTts.setSpeechRate(0.5);
-    await _flutterTts.setPitch(1.0);
+  void _setupAudioListeners() {
+    _audioPlayer.onPositionChanged.listen((Duration position) {
+      if (_playingKey != null) {
+        final duration = _durationMap[_playingKey];
+        if (duration != null && duration.inMilliseconds > 0) {
+          setState(() {
+            _progressMap[_playingKey!] = position.inMilliseconds / duration.inMilliseconds;
+          });
+        }
+      }
+    });
+
+    _audioPlayer.onDurationChanged.listen((Duration duration) {
+      if (_playingKey != null) {
+        setState(() {
+          _durationMap[_playingKey!] = duration;
+        });
+      }
+    });
+
+    _audioPlayer.onPlayerComplete.listen((_) {
+      setState(() {
+        if (_playingKey != null) {
+          _progressMap[_playingKey!] = 1.0;
+        }
+        _playingKey = null;
+        _isAudioPlaying = false;
+      });
+    });
+
+    // audioplayers no longer exposes onPlayerError in newer versions.
+    // Use onPlayerStateChanged to track playing state and handle failures if needed.
+    _audioPlayer.onPlayerStateChanged.listen((PlayerState state) {
+      setState(() {
+        _isAudioPlaying = state == PlayerState.playing;
+        if (state == PlayerState.completed || state == PlayerState.stopped) {
+          _playingKey = null;
+        }
+      });
+    });
   }
 
   Future<void> _initFirebaseAndSession() async {
@@ -162,6 +203,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _messagesMap.clear();
       _defaultFilterSet = false;
       _selectedLanguage = null;
+      _playingKey = null;
+      _isAudioPlaying = false;
+      _progressMap.clear();
+      _durationMap.clear();
     });
 
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -319,7 +364,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     debugPrint('📩 JSON keys: ${json.keys}');
     debugPrint('🔍 sender: "${json['sender']}"');
 
-    // ✅ Support 'text' field (and fallback to 'seq')
     String transcriptText = (json['text'] ?? json['seq'] ?? '').toString().trim();
     transcriptText = _cleanTranscript(transcriptText);
 
@@ -353,12 +397,24 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       key = '$sender|$textPrefix';
     }
 
+    // Extract audio data if present
+    Uint8List? audioBytes;
+    final audioBase64 = json['audio'] as String?;
+    if (audioBase64 != null) {
+      try {
+        audioBytes = base64Decode(audioBase64);
+      } catch (e) {
+        debugPrint('Failed to decode audio: $e');
+      }
+    }
+
     _messagesMap[key] = TranscriptMessage(
       transcript: transcriptText,
       translations: {},
       timestamp: DateTime.now(),
       language: language,
       isUnstable: isUnstable,
+      audioData: audioBytes,
     );
 
     if (_transcriptsRef != null) {
@@ -369,6 +425,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           'timestamp': Timestamp.fromDate(DateTime.now()),
           'language': language,
           'isUnstable': isUnstable,
+          // optionally store audio? (might be large – skip or handle separately)
         });
       } catch (e) {
         debugPrint('⚠️ Could not save to Firestore: $e');
@@ -380,19 +437,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _isConnecting = false;
     });
     _scrollToBottom();
-
-    bool shouldSpeak = _ttsEnabled &&
-        !isUnstable &&
-        transcriptText.isNotEmpty &&
-        !transcriptText.startsWith('{') &&
-        !language.contains('Audio') &&
-        !language.contains('Correction');
-    if (shouldSpeak) {
-      if (_selectedLanguage == null ||
-          language.toLowerCase() == _selectedLanguage!.toLowerCase()) {
-        await _flutterTts.speak(transcriptText);
-      }
-    }
   }
 
   void _reconnect() {
@@ -402,39 +446,36 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _connect(widget.resolvedUrl);
   }
 
-  Future<void> _toggleTts() async {
-    // If TTS is currently enabled, just turn it off and stop.
-    if (_ttsEnabled) {
-      setState(() => _ttsEnabled = false);
-      await _flutterTts.stop();
-      return;
-    }
-
-    // If TTS is OFF, turn it ON and read the current screen text.
-    setState(() => _ttsEnabled = true);
-    
-    // Get the current filtered messages (same logic as in build)
-    final messagesList = _messagesMap.values.toList()
-      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-      
-    List<TranscriptMessage> filteredMessages;
-    if (_selectedLanguage == null) {
-      filteredMessages = messagesList;
-    } else {
-      filteredMessages = messagesList
-          .where((msg) => msg.language.toLowerCase() == _selectedLanguage!.toLowerCase())
-          .toList();
-    }
-
-    // Join all transcripts into one continuous text
-    String fullText = filteredMessages.map((msg) => msg.transcript).join(' ');
-    
-    if (fullText.isNotEmpty) {
-      // Optional: set language based on the first message
-      if (filteredMessages.isNotEmpty) {
-        await _flutterTts.setLanguage(filteredMessages.first.language);
+  Future<void> _playPause(String key, Uint8List audioData) async {
+    if (_playingKey == key) {
+      if (_isAudioPlaying) {
+        await _audioPlayer.pause();
+        setState(() => _isAudioPlaying = false);
+      } else {
+        await _audioPlayer.resume();
+        setState(() => _isAudioPlaying = true);
       }
-      await _flutterTts.speak(fullText);
+    } else {
+      // Stop any current playback
+      await _audioPlayer.stop();
+      setState(() {
+        // Reset progress for previous key (optional)
+        _playingKey = null;
+        _isAudioPlaying = false;
+      });
+
+      try {
+        await _audioPlayer.setSourceBytes(audioData);
+        await _audioPlayer.resume();
+        setState(() {
+          _playingKey = key;
+          _isAudioPlaying = true;
+          _progressMap[key] = 0.0;
+        });
+      } catch (e) {
+        debugPrint('Error playing audio: $e');
+        // Optionally show a snackbar
+      }
     }
   }
 
@@ -445,7 +486,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _channel?.sink.close();
     _sseSubscription?.cancel();
     _sseSubscription = null;
-    await _flutterTts.stop();
+    await _audioPlayer.stop();
     if (mounted) {
       Navigator.pushReplacementNamed(context, '/scan');
     }
@@ -456,54 +497,28 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _channel?.sink.close();
     _sseSubscription?.cancel();
     _sseSubscription = null;
-    _flutterTts.stop();
+    _audioPlayer.dispose();
     _scrollController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final messagesList = _messagesMap.values.toList()
-      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    // Get sorted keys by timestamp
+    final sortedKeys = _messagesMap.keys.toList()
+      ..sort((a, b) => _messagesMap[a]!.timestamp.compareTo(_messagesMap[b]!.timestamp));
 
-    List<TranscriptMessage> filteredMessages;
-    if (_selectedLanguage == null) {
-      filteredMessages = messagesList;
-    } else {
-      filteredMessages = messagesList
-          .where((msg) =>
-              msg.language.toLowerCase() == _selectedLanguage!.toLowerCase())
-          .toList();
-    }
-
-    // Build continuous text with RichText (grey for unstable)
-    List<TextSpan> spans = [];
-    for (int i = 0; i < filteredMessages.length; i++) {
-      final msg = filteredMessages[i];
-      spans.add(
-        TextSpan(
-          text: msg.transcript,
-          style: TextStyle(
-            fontSize: 18,
-            color: msg.isUnstable ? Colors.grey : Colors.black,
-          ),
-        ),
-      );
-      // Add a space between messages (except after the last)
-      if (i < filteredMessages.length - 1) {
-        spans.add(const TextSpan(text: ' '));
-      }
-    }
+    // Filter by selected language
+    final filteredKeys = sortedKeys.where((key) {
+      final msg = _messagesMap[key]!;
+      return _selectedLanguage == null ||
+          msg.language.toLowerCase() == _selectedLanguage!.toLowerCase();
+    }).toList();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Live Transcript'),
         actions: [
-          IconButton(
-            icon: Icon(_ttsEnabled ? Icons.volume_up : Icons.volume_off),
-            onPressed: _toggleTts,
-            tooltip: 'Toggle TTS',
-          ),
           if (_availableLanguages.isNotEmpty)
             DropdownButton<String>(
               value: _selectedLanguage,
@@ -535,7 +550,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       ),
       body: Column(
         children: [
-          // Status bar
+          // Status bar (unchanged)
           Container(
             padding: const EdgeInsets.all(8),
             color: _isConnected ? Colors.green.shade100 : Colors.red.shade100,
@@ -581,9 +596,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
               ],
             ),
           ),
-          // Single card with smooth continuous text
+          // List of message cards
           Expanded(
-            child: filteredMessages.isEmpty
+            child: filteredKeys.isEmpty
                 ? Center(
                     child: Text(
                       _messagesMap.isEmpty
@@ -591,17 +606,61 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                           : 'No messages in $_selectedLanguage',
                     ),
                   )
-                : Card(
-                    margin: const EdgeInsets.all(12),
-                    elevation: 2,
-                    child: SingleChildScrollView(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.all(16),
-                      child: SelectableText.rich(
-                        TextSpan(children: spans),
-                        style: const TextStyle(fontSize: 18),
-                      ),
-                    ),
+                : ListView.builder(
+                    controller: _scrollController,
+                    itemCount: filteredKeys.length,
+                    itemBuilder: (context, index) {
+                      final key = filteredKeys[index];
+                      final message = _messagesMap[key]!;
+                      final hasAudio = message.audioData != null;
+
+                      return Card(
+                        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                message.transcript,
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  color: message.isUnstable ? Colors.grey : Colors.black,
+                                ),
+                              ),
+                              if (hasAudio) ...[
+                                const SizedBox(height: 8),
+                                Row(
+                                  children: [
+                                    IconButton(
+                                      icon: Icon(
+                                        _playingKey == key && _isAudioPlaying
+                                            ? Icons.pause
+                                            : Icons.play_arrow,
+                                      ),
+                                      onPressed: () => _playPause(key, message.audioData!),
+                                    ),
+                                    Expanded(
+                                      child: LinearProgressIndicator(
+                                        value: _progressMap[key] ?? 0.0,
+                                        backgroundColor: Colors.grey[300],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _durationMap[key] != null
+                                          ? '${_durationMap[key]!.inSeconds}s'
+                                          : '',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      );
+                    },
                   ),
           ),
         ],
