@@ -1,15 +1,17 @@
 import 'package:asr_live_translator/screens/session_selection_screen.dart';
+import 'package:firebase_core/firebase_core.dart';  // ✅ correct
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
-import 'package:firebase_core/firebase_core.dart';
+// ✅ REMOVED the broken duplicate import
 import 'screens/qr_scanner_screen.dart';
 import 'screens/live_transcript_screen.dart';
+import 'screens/silent_auth_screen.dart';
 import 'route_observer.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Firebase initialization
+  // Firebase initialization...
   if (kIsWeb) {
     const firebaseOptions = FirebaseOptions(
       apiKey: "AIzaSyDzSrmUy6SB2mSj0IZ3lOIJZ4de5fmps4w",
@@ -23,14 +25,8 @@ void main() async {
     await Firebase.initializeApp(options: firebaseOptions);
   } else if (defaultTargetPlatform == TargetPlatform.android ||
              defaultTargetPlatform == TargetPlatform.iOS) {
-    // Mobile: uses google-services.json / GoogleService-Info.plist
     await Firebase.initializeApp();
   } else {
-    // Desktop (Windows, macOS, Linux): skip Firebase initialization
-    // The app will handle missing Firebase with try-catch in live_transcript_screen.
-    // If you want Firebase on desktop, uncomment the block below and provide your
-    // Firebase web configuration (same as web options).
-    
     const firebaseOptions = FirebaseOptions(
       apiKey: "AIzaSyDzSrmUy6SB2mSj0IZ3lOIJZ4de5fmps4w",
       authDomain: "lectureviewerapp.firebaseapp.com",
@@ -67,16 +63,29 @@ class MyApp extends StatelessWidget {
               originalUrl: args['originalUrl'] as String?,
             );
           } else if (args is String) {
-            // Fallback for backward compatibility (if someone passes a plain String)
             return LiveTranscriptScreen(
               resolvedUrl: args,
               originalUrl: null,
             );
           } else {
-            // Should never happen; show an error screen or redirect
             return const Scaffold(
               body: Center(
                 child: Text('Invalid navigation arguments'),
+              ),
+            );
+          }
+        },
+        '/auth': (context) {
+          final args = ModalRoute.of(context)!.settings.arguments;
+          if (args is Map<String, dynamic>) {
+            return SilentAuthScreen(
+              originalUrl: args['originalUrl'] as String,
+              resolvedUrl: args['resolvedUrl'] as String,
+            );
+          } else {
+            return const Scaffold(
+              body: Center(
+                child: Text('Missing authentication parameters'),
               ),
             );
           }

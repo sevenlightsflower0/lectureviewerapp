@@ -9,6 +9,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'package:audioplayers/audioplayers.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/transcript_message.dart';
 
 class LiveTranscriptScreen extends StatefulWidget {
@@ -51,6 +52,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   final Map<String, Duration> _durationMap = {};
 
   final http.Client _httpClient = http.Client();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
 
   // Store session ID from SSE events
   String? _sseSessionId;
@@ -71,6 +73,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   @override
   void initState() {
     super.initState();
+    _checkAuth(); // new method
     if (kDebugMode) {
       print('🔗 SSE URL: ${widget.resolvedUrl}');
     }
@@ -81,6 +84,23 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     _initFirebaseAndSession();
     _setupAudioListeners();
+  }
+
+  Future<void> _checkAuth() async {
+    final cookies = await _secureStorage.read(key: 'cookies');
+    if (cookies == null || cookies.isEmpty) {
+      // No cookies, navigate to auth screen
+      if (mounted && widget.originalUrl != null) {
+        Navigator.pushReplacementNamed(
+          context,
+          '/auth',
+          arguments: {
+            'originalUrl': widget.originalUrl!,
+            'resolvedUrl': widget.resolvedUrl,
+          },
+        );
+      }
+    }
   }
 
   void _setupAudioListeners() {
@@ -169,6 +189,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         headers: _browserHeaders(),
       );
       if (response.statusCode != 200) return;
+      final setCookie = response.headers['set-cookie'];
+      if (setCookie != null && setCookie.isNotEmpty) {
+        await _secureStorage.write(key: 'cookies', value: setCookie);
+      }
 
       final body = response.body;
 
@@ -458,6 +482,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             headers['Referer'] = widget.originalUrl!;
             headers['Origin'] = _baseUrl!;
           }
+
+          // Read stored cookies from secure storage
+          final String? cookies = await _secureStorage.read(key: 'cookies');
+          if (cookies != null && cookies.isNotEmpty) {
+            headers['Cookie'] = cookies;
+          }
+
           // Try all possible authentication headers
           if (_sseSessionId != null) {
             headers['X-Session-Id'] = _sseSessionId!;
