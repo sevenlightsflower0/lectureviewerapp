@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show kDebugMode;
-import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'live_transcript_screen.dart';
 
@@ -19,15 +19,9 @@ class SilentAuthScreen extends StatefulWidget {
 }
 
 class _SilentAuthScreenState extends State<SilentAuthScreen> {
-  InAppWebViewController? _controller;
-  bool _isLoading = true;
+  late WebViewController _controller;
   bool _isAuthenticated = false;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
-
-  @override
-  void initState() {
-    super.initState();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -36,39 +30,34 @@ class _SilentAuthScreenState extends State<SilentAuthScreen> {
         title: const Text('Loading…'),
         automaticallyImplyLeading: false,
       ),
-      body: InAppWebView(
-        initialUrlRequest: URLRequest(url: WebUri(widget.originalUrl)),
-        onWebViewCreated: (controller) {
+      body: WebView(
+        initialUrl: widget.originalUrl,
+        javascriptMode: JavascriptMode.unrestricted,
+        onWebViewCreated: (WebViewController controller) {
           _controller = controller;
         },
-        onLoadStop: (controller, url) async {
-          setState(() => _isLoading = false);
-          await _checkCookies(controller);
-        },
-        onLoadError: (controller, url, code, message) {
+        onPageFinished: _onPageFinished,
+        onWebResourceError: (error) {
           if (kDebugMode) {
-            print('WebView error: $code - $message');
+            print('WebView error: $error');
           }
-          setState(() => _isLoading = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Failed to load the page. Please try again.')),
-          );
+          _showError('Failed to load the page.');
         },
       ),
     );
   }
 
-  Future<void> _checkCookies(InAppWebViewController controller) async {
-    if (_isAuthenticated) return;
-
+  Future<void> _onPageFinished(String url) async {
     try {
-      final cookies = await controller.evaluateJavascript(
-        source: 'document.cookie',
-      );
-      if (cookies != null &&
-          cookies.isNotEmpty &&
-          cookies.toString().contains('_forward_auth_csrf')) {
-        await _storage.write(key: 'cookies', value: cookies.toString());
+      // use runJavascriptReturningResult which returns the JS result as a String
+      var cookies = await _controller.runJavascriptReturningResult('document.cookie');
+      // result may be quoted (e.g. '"a=1; b=2"'), so strip surrounding quotes
+      if (cookies.length >= 2 && ((cookies.startsWith('"') && cookies.endsWith('"')) || (cookies.startsWith("'") && cookies.endsWith("'")))) {
+        cookies = cookies.substring(1, cookies.length - 1);
+        cookies = cookies.replaceAll(r'\"', '"');
+      }
+      if (cookies.isNotEmpty && cookies.contains('_forward_auth_csrf')) {
+        await _storage.write(key: 'cookies', value: cookies);
         if (mounted && !_isAuthenticated) {
           setState(() => _isAuthenticated = true);
           Navigator.pushReplacement(
@@ -81,23 +70,19 @@ class _SilentAuthScreenState extends State<SilentAuthScreen> {
             ),
           );
         }
-      } else {
-        // Not authenticated – check again after 3 seconds
-        Future.delayed(const Duration(seconds: 3), () {
-          if (mounted && !_isAuthenticated) {
-            _checkCookies(controller);
-          }
-        });
       }
     } catch (e) {
       if (kDebugMode) {
         print('Error extracting cookies: $e');
       }
-      Future.delayed(const Duration(seconds: 3), () {
-        if (mounted && !_isAuthenticated) {
-          _checkCookies(controller);
-        }
-      });
+    }
+  }
+
+  void _showError(String message) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
     }
   }
 }
