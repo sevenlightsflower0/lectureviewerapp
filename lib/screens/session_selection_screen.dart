@@ -6,8 +6,8 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:http/http.dart' as http;
 import 'dart:developer' as developer;
-import 'package:wakelock/wakelock.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../route_observer.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -172,9 +172,9 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
       _keepScreenOn = prefs.getBool(_kKeepScreenOnKey) ?? false;
     });
     if (_keepScreenOn) {
-      await Wakelock.enable();
+      await WakelockPlus.enable();
     } else {
-      await Wakelock.disable();
+      await WakelockPlus.disable();
     }
   }
 
@@ -189,9 +189,9 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     await prefs.setBool(_kKeepScreenOnKey, value);
     setState(() => _keepScreenOn = value);
     if (value) {
-      await Wakelock.enable();
+      await WakelockPlus.enable();
     } else {
-      await Wakelock.disable();
+      await WakelockPlus.disable();
     }
   }
 
