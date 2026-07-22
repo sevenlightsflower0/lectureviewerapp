@@ -92,11 +92,11 @@ jobs:
             pod install --repo-update && break
             echo "Retry in 10s..."
             sleep 10
-          done
-      
-      # --- Bump the generated Swift package to iOS 15.0 ---
-      - name: Bump FlutterGeneratedPluginSwiftPackage to iOS 15.0
-        run: flutter build ios --config-only
+          done     
+
+      # --- Generate iOS config with iOS 15.0 (no signing) ---
+      - name: Generate iOS config with iOS 15.0
+        run: flutter build ios --config-only --no-codesign
 
       # --- Build (unsigned) ---
       - name: Build iOS (unsigned)
