@@ -27,45 +27,52 @@ jobs:
           if [ ! -f "ios/Podfile" ]; then
             echo "ios/Podfile not found. Creating one..."
             cat > ios/Podfile << EOF
-platform :ios, '13.0'
-target 'Runner' do
-  use_frameworks!
-  use_modular_headers!
-  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
-end
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    flutter_additional_ios_build_settings(target)
-  end
-end
-EOF
+          platform :ios, '13.0'
+          target 'Runner' do
+            use_frameworks!
+            use_modular_headers!
+            flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+          end
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              flutter_additional_ios_build_settings(target)
+            end
+          end
+          EOF
           fi
 
-          # Now patch it to set platform to 15.0
+          # Now patch it to set platform to 15.0 using a heredoc (no quote issues)
           echo "Patching ios/Podfile to set platform to 15.0..."
-          python3 -c "
-import re
-with open('ios/Podfile', 'r') as f:
-    content = f.read()
-# Replace any existing platform line with iOS 15.0
-pattern = r'^\\s*#?\\s*platform\\s+:ios\\s*,\\s*['\\\"](.*?)['\\\"]'
-if re.search(pattern, content, re.MULTILINE):
-    content = re.sub(pattern, \"platform :ios, '15.0'\", content, flags=re.MULTILINE)
-else:
-    # If no platform line is found, insert it at the top
-    content = \"platform :ios, '15.0'\n\" + content
-with open('ios/Podfile', 'w') as f:
-    f.write(content)
-"
+          python3 << 'PYTHON'
+          import re
+          with open('ios/Podfile', 'r') as f:
+              content = f.read()
+          # Replace any existing platform line with iOS 15.0
+          pattern = r'^\s*#?\s*platform\s+:ios\s*,\s*[\'"](.*?)[\'"]'
+          if re.search(pattern, content, re.MULTILINE):
+              content = re.sub(pattern, "platform :ios, '15.0'", content, flags=re.MULTILINE)
+          else:
+              # If no platform line is found, insert it at the top
+              content = "platform :ios, '15.0'\n" + content
+          with open('ios/Podfile', 'w') as f:
+              f.write(content)
+          PYTHON
+
           # Verify the change
           echo "--- Updated Podfile platform setting: ---"
           grep "platform :ios" ios/Podfile || echo "WARNING: platform line not found!"
 
       # --- Add Firebase iOS configuration (required for Firebase Core/Auth/Firestore) ---
       - name: Create GoogleService-Info.plist
+        env:
+          FIREBASE_IOS_PLIST: ${{ secrets.FIREBASE_IOS_PLIST }}
         run: |
+          if [ -z "$FIREBASE_IOS_PLIST" ]; then
+            echo "ERROR: FIREBASE_IOS_PLIST secret is not set. Please add it."
+            exit 1
+          fi
           mkdir -p ios/Runner
-          echo "${{ secrets.FIREBASE_IOS_PLIST }}" > ios/Runner/GoogleService-Info.plist
+          printf '%s' "$FIREBASE_IOS_PLIST" > ios/Runner/GoogleService-Info.plist
 
       # --- Install Pods ---
       - name: Update CocoaPods repository with retry
@@ -119,4 +126,3 @@ with open('ios/Podfile', 'w') as f:
           name: FlutterIpaExport.ipa
           path: build/ios/FlutterIpaExport.ipa
           retention-days: 7
-          
