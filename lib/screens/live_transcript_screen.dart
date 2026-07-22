@@ -12,7 +12,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/transcript_message.dart';
 
-// Web-only import
+// Web-only import – ignore deprecation warning
+// ignore: avoid_web_libraries_in_flutter
 import 'dart:html' as html;
 
 class LiveTranscriptScreen extends StatefulWidget {
@@ -52,7 +53,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   // Audio player for non-web (mobile/desktop)
   final AudioPlayer _audioPlayer = AudioPlayer();
-  // Web audio element
+  // Web audio element (for both blob and cross-origin URLs)
   html.AudioElement? _audioElement;
 
   String? _playingKey;
@@ -65,7 +66,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
   String? _sseSessionId;
   String? _baseUrl;
-  String? _cookieString;
+  String? _cookieString; // used for non-web fallback
 
   bool get _isDesktop {
     if (kIsWeb) return false;
@@ -392,7 +393,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         final events = buffer.split('\n\n');
         if (events.length > 1) {
           buffer = events.removeLast();
-          for (final eventBlock in events) _parseSSEEvent(eventBlock);
+          for (final eventBlock in events) {
+            _parseSSEEvent(eventBlock);
+          }
         }
       }, onError: (error) {
         debugPrint('❌ SSE stream error: $error');
@@ -436,7 +439,9 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     final lines = eventBlock.split('\n');
     StringBuffer dataBuffer = StringBuffer();
     for (final line in lines) {
-      if (line.startsWith('data:')) dataBuffer.writeln(line.substring(5).trim());
+      if (line.startsWith('data:')) {
+        dataBuffer.writeln(line.substring(5).trim());
+      }
     }
     final data = dataBuffer.toString().trim();
     if (data.isEmpty) return;
@@ -535,7 +540,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
     String transcriptText = '';
     Uint8List? audioBytes;
-    String? audioUrl; // for web
+    String? audioUrl; // for web: original URL (or blob if we ever fetch)
 
     // ============================================================
     // TTS MESSAGE HANDLER
@@ -551,7 +556,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       final audioUrlPath = json['b64_enc_pcm_s16le'] as String?;
       if (audioUrlPath != null) {
         try {
-          // Build full URL
+          // Build full URL with query parameters
           String fullUrl = audioUrlPath.startsWith('http') ? audioUrlPath : '$_baseUrl$audioUrlPath';
           final uri = Uri.parse(fullUrl);
           final params = Map<String, String>.from(uri.queryParameters);
@@ -563,40 +568,52 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             params['stream'] = _sseSessionId!;
           }
           fullUrl = uri.replace(queryParameters: params).toString();
-          audioUrl = fullUrl;
-          debugPrint('🎵 Audio URL: $audioUrl');
+          debugPrint('🎵 Audio URL: $fullUrl');
 
-          // For non-web, we still attempt to download (but we'll skip if not necessary)
-          if (!kIsWeb) {
-            // Try to fetch with manual cookie (may work on mobile/desktop)
+          if (kIsWeb) {
+            // Web: just store the URL – the <audio> element will handle authentication via crossOrigin
+            audioUrl = fullUrl;
+            // Optionally, we could try to fetch and convert here, but we rely on the <audio> element.
+            // To give the user a better experience, we could attempt fetch with credentials,
+            // but we've had CORS issues. We'll let the <audio> element handle it.
+          } else {
+            // NON‑WEB: Use http.Client with manual cookie
             final headers = {
               ..._browserHeaders(),
               'Referer': _baseUrl!,
               'Origin': _baseUrl!,
             };
-            if (_cookieString != null && _cookieString!.isNotEmpty) {
-              headers['Cookie'] = _cookieString!;
+            String? cookieToSend = _cookieString;
+            if (cookieToSend == null || cookieToSend.isEmpty) {
+              cookieToSend = await _secureStorage.read(key: 'cookies');
+            }
+            if (cookieToSend != null && cookieToSend.isNotEmpty) {
+              headers['Cookie'] = cookieToSend;
+              debugPrint('🍪 Sending cookie (non-web): $cookieToSend');
             } else if (_sseSessionId != null) {
               headers['Cookie'] = 'session=$_sseSessionId;';
+              debugPrint('🍪 Sending fallback cookie (non-web): session=$_sseSessionId');
             }
+
             final response = await _httpClient.get(
               Uri.parse(fullUrl),
               headers: headers,
             ).timeout(const Duration(seconds: 15));
+
             if (response.statusCode == 200) {
-              audioBytes = _pcmToWav(response.bodyBytes, sampleRate: 16000);
+              final wavBytes = _pcmToWav(response.bodyBytes, sampleRate: 16000);
+              audioBytes = wavBytes;
               debugPrint('✅ Downloaded & converted audio: ${audioBytes.length} bytes');
             } else {
-              debugPrint('❌ Failed to fetch audio (non-web): HTTP ${response.statusCode}');
-              // If fails, we still have the URL – but we cannot play it via audioplayers without bytes.
+              debugPrint('❌ Failed to fetch audio: HTTP ${response.statusCode}');
             }
           }
-          // On web, we keep audioUrl and will use <audio> tag
         } catch (e) {
           debugPrint('❌ Error processing audio: $e');
         }
       }
 
+      // Store the message
       const language = 'TTS';
       _availableLanguages.add(language);
       if (!_defaultFilterSet) {
@@ -610,7 +627,6 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
       final key = 'tts_${json['message_id'] ?? DateTime.now().millisecondsSinceEpoch}';
 
-      // Store message with either audio bytes (non-web) or URL (web)
       _messagesMap[key] = TranscriptMessage(
         transcript: transcriptText,
         translations: {},
@@ -618,7 +634,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         language: language,
         isUnstable: isUnstable,
         audioData: audioBytes,
-        audioUrl: audioUrl, // <-- new field in model
+        audioUrl: audioUrl,
       );
 
       if (_transcriptsRef != null) {
@@ -707,12 +723,74 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     _scrollToBottom();
   }
 
-  // ========== PLAY / PAUSE (web vs non-web) ==========
+  // ========== PLAY / PAUSE ==========
   Future<void> _playPause(String key, TranscriptMessage message) async {
     if (kIsWeb) {
-      // Web: use HTML5 Audio
+      // Web: use HTML5 Audio with crossOrigin="use-credentials"
+      if (message.audioUrl == null) {
+        debugPrint('⚠️ No audio URL for this message');
+        return;
+      }
+
+      // If we have a blob URL (in-page fetch & convert), use it directly
+      if (message.audioUrl!.startsWith('blob:')) {
+        if (_playingKey == key) {
+          // Toggle play/pause
+          if (_audioElement != null) {
+            if (_audioElement!.paused) {
+              await _audioElement!.play();
+              setState(() => _isAudioPlaying = true);
+            } else {
+              _audioElement!.pause();
+              setState(() => _isAudioPlaying = false);
+            }
+          }
+          return;
+        }
+
+        _audioElement?.pause();
+        _audioElement = null;
+
+        final audio = html.AudioElement()
+          ..src = message.audioUrl!
+          ..autoplay = true
+          ..onError.listen((e) {
+            debugPrint('❌ Audio error: $e');
+            setState(() {
+              _playingKey = null;
+              _isAudioPlaying = false;
+            });
+          });
+
+        audio.onEnded.listen((_) {
+          if (!mounted) return;
+          setState(() {
+            _playingKey = null;
+            _isAudioPlaying = false;
+            _progressMap[key] = 1.0;
+          });
+        });
+
+        audio.onTimeUpdate.listen((_) {
+          if (!mounted) return;
+          if (audio.duration > 0) {
+            setState(() {
+              _progressMap[key] = audio.currentTime / audio.duration;
+            });
+          }
+        });
+
+        _audioElement = audio;
+        setState(() {
+          _playingKey = key;
+          _isAudioPlaying = true;
+          _progressMap[key] = 0.0;
+        });
+        return;
+      }
+
+      // Otherwise, use the original URL with crossOrigin="use-credentials"
       if (_playingKey == key) {
-        // Toggle pause/play
         if (_audioElement != null) {
           if (_audioElement!.paused) {
             await _audioElement!.play();
@@ -725,30 +803,23 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         return;
       }
 
-      // Stop current and play new
       _audioElement?.pause();
       _audioElement = null;
 
-      if (message.audioUrl == null) {
-        debugPrint('⚠️ No audio URL for this message');
-        return;
-      }
-
       final audio = html.AudioElement()
         ..src = message.audioUrl!
+        ..crossOrigin = 'use-credentials'  // <-- this sends cookies
         ..autoplay = true
         ..onError.listen((e) {
-          debugPrint('❌ Audio error: $e');
+          debugPrint('❌ Audio error: $e – opening in new tab');
+          // Fallback: open in new tab
+          html.window.open(message.audioUrl!, '_blank');
           setState(() {
             _playingKey = null;
             _isAudioPlaying = false;
           });
-        })
-        ..onCanPlay.listen((_) {
-          // audio is ready
         });
 
-      // Listen for end
       audio.onEnded.listen((_) {
         if (!mounted) return;
         setState(() {
@@ -758,13 +829,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         });
       });
 
-      // Update progress (optional, but not as easy with HTML5)
-      // We could use timeupdate event
       audio.onTimeUpdate.listen((_) {
         if (!mounted) return;
-        if (audio.duration != null && audio.duration! > 0) {
+        if (audio.duration > 0) {
           setState(() {
-            _progressMap[key] = audio.currentTime / audio.duration!;
+            _progressMap[key] = audio.currentTime / audio.duration;
           });
         }
       });
@@ -775,49 +844,50 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         _isAudioPlaying = true;
         _progressMap[key] = 0.0;
       });
-    } else {
-      // Non-web: use audioplayers with downloaded bytes
-      if (_playingKey == key) {
-        if (_isAudioPlaying) {
-          await _audioPlayer.pause();
-          if (!mounted) return;
-          setState(() => _isAudioPlaying = false);
-        } else {
-          await _audioPlayer.resume();
-          if (!mounted) return;
-          setState(() => _isAudioPlaying = true);
-        }
-        return;
-      }
+      return;
+    }
 
-      await _audioPlayer.stop();
-      if (!mounted) return;
-      setState(() {
-        _playingKey = null;
-        _isAudioPlaying = false;
-      });
-
-      if (message.audioData == null) {
-        debugPrint('⚠️ No audio data for non-web');
-        return;
-      }
-
-      try {
-        await _audioPlayer.setSourceBytes(message.audioData!);
+    // Non-web: use audioplayers with downloaded bytes
+    if (_playingKey == key) {
+      if (_isAudioPlaying) {
+        await _audioPlayer.pause();
+        if (!mounted) return;
+        setState(() => _isAudioPlaying = false);
+      } else {
         await _audioPlayer.resume();
         if (!mounted) return;
-        setState(() {
-          _playingKey = key;
-          _isAudioPlaying = true;
-          _progressMap[key] = 0.0;
-        });
-      } catch (e) {
-        debugPrint('Error playing audio: $e');
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Audio playback error: $e')),
-        );
+        setState(() => _isAudioPlaying = true);
       }
+      return;
+    }
+
+    await _audioPlayer.stop();
+    if (!mounted) return;
+    setState(() {
+      _playingKey = null;
+      _isAudioPlaying = false;
+    });
+
+    if (message.audioData == null) {
+      debugPrint('⚠️ No audio data for non-web');
+      return;
+    }
+
+    try {
+      await _audioPlayer.setSourceBytes(message.audioData!);
+      await _audioPlayer.resume();
+      if (!mounted) return;
+      setState(() {
+        _playingKey = key;
+        _isAudioPlaying = true;
+        _progressMap[key] = 0.0;
+      });
+    } catch (e) {
+      debugPrint('Error playing audio: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Audio playback error: $e')),
+      );
     }
   }
 
@@ -889,7 +959,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 ],
                 onChanged: (newLang) => setState(() => _selectedLanguage = newLang),
               ),
-            // Manual cookie override (optional, keep for debugging)
+            // Manual cookie override (for non‑web debugging)
             IconButton(
               icon: const Icon(Icons.edit),
               onPressed: () {
@@ -914,7 +984,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                   ),
                 );
               },
-              tooltip: 'Manually set cookie',
+              tooltip: 'Manually set cookie (non‑web)',
             ),
             PopupMenuButton<String>(
               icon: const Icon(Icons.more_vert),
@@ -997,7 +1067,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 itemBuilder: (context, index) {
                   final key = filteredKeys[index];
                   final message = _messagesMap[key]!;
-                  final hasAudio = kIsWeb ? message.audioUrl != null : message.audioData != null;
+                  // For web: show play button if audioUrl exists
+                  final hasAudio = kIsWeb
+                      ? message.audioUrl != null
+                      : message.audioData != null;
 
                   return Card(
                     margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -1040,13 +1113,23 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               onPressed: () => _playPause(key, message),
                             ),
                             const SizedBox(width: 8),
-                            SizedBox(
-                              width: 60,
-                              child: LinearProgressIndicator(
-                                value: _progressMap[key] ?? 0.0,
-                                backgroundColor: Colors.grey[300],
+                            // Show progress only for blob URLs (in‑page playback) or non-web
+                            if (kIsWeb && message.audioUrl != null && message.audioUrl!.startsWith('blob:'))
+                              SizedBox(
+                                width: 60,
+                                child: LinearProgressIndicator(
+                                  value: _progressMap[key] ?? 0.0,
+                                  backgroundColor: Colors.grey[300],
+                                ),
+                              )
+                            else if (!kIsWeb && message.audioData != null)
+                              SizedBox(
+                                width: 60,
+                                child: LinearProgressIndicator(
+                                  value: _progressMap[key] ?? 0.0,
+                                  backgroundColor: Colors.grey[300],
+                                ),
                               ),
-                            ),
                             const SizedBox(width: 6),
                             Text(
                               _durationMap[key] != null ? '${_durationMap[key]!.inSeconds}s' : '',
