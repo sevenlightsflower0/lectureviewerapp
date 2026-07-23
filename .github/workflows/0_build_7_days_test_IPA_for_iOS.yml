@@ -78,32 +78,41 @@ jobs:
       - name: Install CocoaPods dependencies
         working-directory: ios
         run: pod install --repo-update
-
-      # --- Generate config (triggers migration) ---
-      - name: Generate iOS config with iOS 15.0
-        run: flutter build ios --config-only --no-codesign
-
-      # --- Patch FlutterGeneratedPluginSwiftPackage (reliable method) ---
-      - name: Patch FlutterGeneratedPluginSwiftPackage
+      # --- Force iOS deployment target to 15.0 (Xcode + SPM) ---
+      - name: Force iOS deployment target to 15.0
         run: |
+          # Update Podfile
+          sed -i '' 's/platform :ios, .*/platform :ios, '\''15.0'\''/' ios/Podfile || true
+
+          # Patch Xcode project
+          PROJECT_FILE="ios/Runner.xcodeproj/project.pbxproj"
+          if [ -f "$PROJECT_FILE" ]; then
+            sed -i '' 's/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]\+;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/g' "$PROJECT_FILE"
+            sed -i '' 's/DEPLOYMENT_TARGET = [0-9.]\+;/DEPLOYMENT_TARGET = 15.0;/g' "$PROJECT_FILE"
+          fi
+
+          # Run config generation (triggers migration)
+          flutter build ios --config-only --no-codesign
+
+          # Safeguard: directly patch Package.swift
           PACKAGE_FILE="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
           if [ -f "$PACKAGE_FILE" ]; then
-            echo "Patching $PACKAGE_FILE..."
-            # Replace iOS 13.0 with 15.0
-            sed -i '' 's/.iOS("13.0")/.iOS("15.0")/g' "$PACKAGE_FILE"
-            # Also replace any other version if needed
             sed -i '' 's/.iOS("[0-9.]\+")/.iOS("15.0")/g' "$PACKAGE_FILE"
-            echo "Patched Package.swift:"
-            grep -A2 "platforms" "$PACKAGE_FILE" || echo "Could not find platforms section"
+            echo "✅ Patched Package.swift to iOS 15.0"
           else
-            echo "ERROR: Package.swift not found!"
+            echo "⚠️ Package.swift not found – migration may have failed"
             exit 1
           fi
 
-      # --- Final unsigned build ---
+      - name: Regenerate iOS folder
+        run: |
+          rm -rf ios
+          flutter create --platforms=ios .
+
       - name: Build iOS (unsigned)
         run: flutter build ios --release --no-codesign
 
+          
       # --- Package IPA ---
       - name: Create Payload and IPA
         working-directory: build/ios/iphoneos
