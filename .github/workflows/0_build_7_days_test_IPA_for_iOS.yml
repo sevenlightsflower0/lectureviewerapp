@@ -6,9 +6,9 @@ on:
 jobs:
   build-ios:
     name: 🎉 iOS Build (7-days free testing)
-    runs-on: macos-14                     # avoids Xcode 16 strictness
+    runs-on: macos-14
     env:
-      FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # disable SPM globally
+      FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # disables SPM globally
 
     steps:
       - uses: actions/checkout@v4
@@ -20,15 +20,14 @@ jobs:
 
       - run: flutter clean
 
-      # --- CREATE BOTH DIRECTORIES BEFORE PUB GET ---
       - name: Create SourcePackages directories for all platforms
         run: |
           mkdir -p build/ios/SourcePackages
           mkdir -p build/macos/SourcePackages
 
-      - run: flutter pub get                     # now rsync will succeed
+      - run: flutter pub get
 
-      # --- Patch Podfile to set dummy team and disable signing ---
+      # --- Patch Podfile ---
       - name: Replace post_install block in Podfile
         run: |
           python3 << 'PYTHON'
@@ -74,7 +73,7 @@ jobs:
           print("Podfile patched successfully")
           PYTHON
 
-      # --- Patch Xcode project (optional but safe) ---
+      # --- Patch Xcode project ---
       - name: Force disable code signing in Xcode project
         run: |
           PROJECT_FILE="ios/Runner.xcodeproj/project.pbxproj"
@@ -100,7 +99,7 @@ jobs:
           plutil -convert xml1 -o "$PROJECT_FILE" /tmp/project.json
           echo "Project patched successfully"
 
-      # --- Install Pods (CocoaPods) ---
+      # --- Install Pods ---
       - name: Update CocoaPods repository with retry
         working-directory: ios
         run: |
@@ -120,12 +119,12 @@ jobs:
             sleep 10
           done
 
-      # --- Build (with explicit flag to disable SPM) ---
+      # --- Build (removed the unsupported flag) ---
       - name: Build iOS (unsigned)
         env:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGN_IDENTITY: ""
-        run: flutter build ios --release --no-codesign --no-swift-package-manager
+        run: flutter build ios --release --no-codesign
 
       # --- Package IPA ---
       - name: Create Payload and IPA
@@ -155,4 +154,3 @@ jobs:
           name: FlutterIpaExport.ipa
           path: build/ios/FlutterIpaExport.ipa
           retention-days: 7
-          
