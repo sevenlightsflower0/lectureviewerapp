@@ -5,7 +5,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14   # downgraded to avoid Xcode 16 strictness
+    runs-on: macos-14   # older runner avoids Xcode 16 signing strictness
     steps:
       - uses: actions/checkout@v4
 
@@ -32,11 +32,9 @@ jobs:
         working-directory: ios
         run: pod install --repo-update
 
-      - name: Ensure SourcePackages directory exists
-        run: mkdir -p build/ios/SourcePackages
-
-      - name: Build unsigned IPA
+      - name: Build unsigned IPA (SPM disabled)
         env:
+          FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # <-- key fix
           DEVELOPMENT_TEAM: "DUMMYTEAM"
           CODE_SIGN_STYLE: "Manual"
         run: flutter build ios --release --no-codesign
