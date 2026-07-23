@@ -6,9 +6,9 @@ on:
 jobs:
   build-ios:
     name: 🎉 iOS Build (7-days free testing)
-    runs-on: macos-14                           # avoids Xcode 16 strictness
+    runs-on: macos-14                     # optional, but avoids Xcode 16 strictness
     env:
-      FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # <-- KEY: disables SPM for all steps
+      FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # <-- DISABLE SPM FOR ALL STEPS
 
     steps:
       - uses: actions/checkout@v4
@@ -19,9 +19,9 @@ jobs:
           architecture: x64
 
       - run: flutter clean
-      - run: flutter pub get          # now won't try rsync
+      - run: flutter pub get                     # now won't try to copy via rsync
 
-      # --- Patch Podfile (optional, but safe) ---
+      # --- (Optional) Patch Podfile to set dummy team and disable signing ---
       - name: Replace post_install block in Podfile
         run: |
           python3 << 'PYTHON'
@@ -67,7 +67,7 @@ jobs:
           print("Podfile patched successfully")
           PYTHON
 
-      # --- Patch Xcode project (optional, but safe) ---
+      # --- Patch Xcode project (optional but safe) ---
       - name: Force disable code signing in Xcode project
         run: |
           PROJECT_FILE="ios/Runner.xcodeproj/project.pbxproj"
@@ -93,7 +93,7 @@ jobs:
           plutil -convert xml1 -o "$PROJECT_FILE" /tmp/project.json
           echo "Project patched successfully"
 
-      # --- Install Pods ---
+      # --- Install Pods (CocoaPods) ---
       - name: Update CocoaPods repository with retry
         working-directory: ios
         run: |
@@ -113,7 +113,7 @@ jobs:
             sleep 10
           done
 
-      # --- Build (now with SPM disabled) ---
+      # --- Build (with explicit flag to disable SPM) ---
       - name: Build iOS (unsigned)
         env:
           CODE_SIGNING_ALLOWED: "NO"
