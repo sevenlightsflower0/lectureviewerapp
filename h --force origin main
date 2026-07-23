@@ -1,0 +1,37 @@
+[33m42c8c8d[m[33m ([m[1;36mHEAD -> [m[1;32mmain[m[33m)[m HEAD@{0}: commit: IPHONEOS_DEPLOYMENT_TARGET = 15.0; in ios/Podfile
+[33mbe52d03[m HEAD@{1}: pull origin main: Fast-forward
+[33m5bf9a68[m HEAD@{2}: commit: IPA building workflow repairing
+[33m3ffce93[m HEAD@{3}: pull: Fast-forward
+[33m491bd7c[m HEAD@{4}: commit: IPA building trial
+[33m4a3d231[m HEAD@{5}: reset: moving to origin/main
+[33mf4d72e0[m HEAD@{6}: commit: trying to make TTS on web(chrome) working with cookies usw., still not
+[33m9ac7315[m HEAD@{7}: pull origin main: Fast-forward
+[33m20b08c4[m HEAD@{8}: commit: compiling with webview somehow
+[33mb7976de[m HEAD@{9}: commit: not working webview_flutter_windows
+[33m25173e7[m HEAD@{10}: commit: flutter_inappwebview as over the weblink
+[33m339207c[m HEAD@{11}: commit: webview_flutter problems
+[33mb134dc0[m HEAD@{12}: commit: TTS has cookies/auth problems
+[33mc3524df[m HEAD@{13}: commit: 1. trial to get the server tts not working
+[33m26cd053[m HEAD@{14}: commit: flutter-tts is somehow working, but not properly
+[33md980202[m HEAD@{15}: commit: not really better version/
+[33m42c5b8c[m HEAD@{16}: commit: all messages come one after another in one screen card
+[33m5878897[m HEAD@{17}: commit: unstable grey becomes stable black scrolling working, but too many new lines
+[33mcd7dfbb[m HEAD@{18}: commit: unstable grey becomes stable black
+[33m9d95e4b[m HEAD@{19}: commit: glyphs are now in pdfs
+[33mae84590[m HEAD@{20}: commit: sharing works, but too many new lines
+[33m2d7d101[m HEAD@{21}: commit: sharing works, but not for old sessions
+[33m8d5ab0c[m HEAD@{22}: commit: sharing works, but too many pages
+[33m90c8bdd[m HEAD@{23}: commit: sharing works, but too many new lines
+[33m5f9ae67[m HEAD@{24}: commit: sharing PDFs partually ready
+[33m970320a[m HEAD@{25}: commit: 09-07-2026 23:30
+[33mc60a641[m HEAD@{26}: pull: Fast-forward
+[33m1089fa6[m HEAD@{27}: commit: editable first name and sorting the list added, it is the date
+[33m778c1cd[m HEAD@{28}: commit: editable first name added, but it is not the date
+[33mbf3818f[m HEAD@{29}: commit: QR code link as the name and updated time of connecting
+[33md59d58d[m HEAD@{30}: pull: Fast-forward
+[33mcfd6eb0[m HEAD@{31}: pull origin main: Fast-forward
+[33md0c8829[m HEAD@{32}: commit: start screen and typing link instead of reading the qr code added
+[33m6c7e34d[m HEAD@{33}: commit: working firebase settings proposed
+[33me6391b4[m HEAD@{34}: commit: somehow working for windows
+[33m0f828d0[m HEAD@{35}: Branch: renamed refs/heads/master to refs/heads/main
+[33m0f828d0[m HEAD@{37}: commit (initial): Initial commit
