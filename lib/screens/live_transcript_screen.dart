@@ -68,6 +68,19 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
   String? _baseUrl;
   String? _cookieString; // used for non-web fallback
 
+  // ========== NEW: Mic mute state tracking ==========
+  final Map<String, bool> _asrPauseState = {};
+
+  bool get _isMicrophoneMuted {
+    // Find the active ASR sender – we assume the first one that has ever been seen.
+    final activeSender = _senderToLanguage?.keys.firstWhere(
+      (s) => s.startsWith('asr:'),
+      orElse: () => '',
+    );
+    if (activeSender == null || activeSender.isEmpty) return false;
+    return _asrPauseState[activeSender] ?? false;
+  }
+
   bool get _isDesktop {
     if (kIsWeb) return false;
     switch (defaultTargetPlatform) {
@@ -319,6 +332,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _progressMap.clear();
       _durationMap.clear();
       _sseSessionId = null;
+      _asrPauseState.clear(); // NEW: reset mute state
     });
     _connect(widget.resolvedUrl);
   }
@@ -337,6 +351,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       _progressMap.clear();
       _durationMap.clear();
       _sseSessionId = null;
+      _asrPauseState.clear(); // NEW
     });
     if (url.startsWith('http://') || url.startsWith('https://')) {
       _connectSSE(url);
@@ -523,7 +538,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     });
   }
 
-  // ========== MAIN MESSAGE HANDLER ==========
+  // ========== MAIN MESSAGE HANDLER (MODIFIED) ==========
   Future<void> _handleMessage(Map<String, dynamic> json) async {
     debugPrint('📩 JSON keys: ${json.keys}');
     debugPrint('🔍 sender: "${json["sender"]}"');
@@ -535,12 +550,37 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     }
 
     final sender = json['sender'] ?? '';
-    final isUnstable = json['unstable'] == true;
-    final start = json['start']?.toString() ?? '';
+												
+												  
 
-    String transcriptText = '';
-    Uint8List? audioBytes;
-    String? audioUrl; // for web: original URL (or blob if we ever fetch)
+    // ============================================================
+    // NEW: Handle control signals (PAUSE, END, etc.)
+    // ============================================================
+    if (json.containsKey('controll')) {
+      final controll = json['controll'] as String;
+      if (controll == 'PAUSE' && !sender.contains('tts')) {
+        _asrPauseState[sender] = true;
+        debugPrint('🔇 Microphone PAUSED (muted) for sender: $sender');
+        if (mounted) setState(() {});
+        return; // PAUSE does not carry transcript
+      }
+      if (controll == 'END') {
+        debugPrint('⏹️ END received – ignoring');
+        return;
+      }
+      // For other controls (slides, etc.) we ignore them here
+      // (they are handled elsewhere in the original web version)
+      return;
+    }
+
+    // ============================================================
+    // NEW: Reset mute state on any ASR transcript
+    // ============================================================
+    if (sender.startsWith('asr:') && (json.containsKey('seq') || json.containsKey('text'))) {
+      _asrPauseState[sender] = false;
+      debugPrint('🎤 Transcript received – microphone ACTIVE (unmuted) for sender: $sender');
+      if (mounted) setState(() {});
+    }
 
     // ============================================================
     // TTS MESSAGE HANDLER
@@ -551,8 +591,10 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         debugPrint('⏭️ Skipping TTS with empty text');
         return;
       }
-      transcriptText = _cleanTranscript(text);
+      final transcriptText = _cleanTranscript(text);
 
+      String? audioUrl;
+      Uint8List? audioBytes;
       final audioUrlPath = json['b64_enc_pcm_s16le'] as String?;
       if (audioUrlPath != null) {
         try {
@@ -571,13 +613,13 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           debugPrint('🎵 Audio URL: $fullUrl');
 
           if (kIsWeb) {
-            // Web: just store the URL – the <audio> element will handle authentication via crossOrigin
+																										 
             audioUrl = fullUrl;
-            // Optionally, we could try to fetch and convert here, but we rely on the <audio> element.
-            // To give the user a better experience, we could attempt fetch with credentials,
-            // but we've had CORS issues. We'll let the <audio> element handle it.
+																									  
+																							 
+																				  
           } else {
-            // NON‑WEB: Use http.Client with manual cookie
+            // NON‑WEB: fetch with cookies
             final headers = {
               ..._browserHeaders(),
               'Referer': _baseUrl!,
@@ -632,7 +674,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
         translations: {},
         timestamp: DateTime.now(),
         language: language,
-        isUnstable: isUnstable,
+        isUnstable: json['unstable'] == true,
         audioData: audioBytes,
         audioUrl: audioUrl,
       );
@@ -644,7 +686,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             'translations': {},
             'timestamp': Timestamp.fromDate(DateTime.now()),
             'language': language,
-            'isUnstable': isUnstable,
+            'isUnstable': json['unstable'] == true,
           });
         } catch (e) {
           debugPrint('⚠️ Could not save to Firestore: $e');
@@ -663,8 +705,8 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
     // ============================================================
     // NON-TTS MESSAGE
     // ============================================================
-    transcriptText = (json['text'] ?? json['seq'] ?? '').toString().trim();
-    transcriptText = _cleanTranscript(transcriptText);
+    final rawText = (json['text'] ?? json['seq'] ?? '').toString().trim();
+    final transcriptText = _cleanTranscript(rawText);
     if (transcriptText.isEmpty) {
       debugPrint('⏭️ Skipping message with empty text/seq');
       return;
@@ -683,6 +725,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       }
     }
 
+    final start = json['start']?.toString() ?? '';
     String key;
     if (start.isNotEmpty) {
       key = '$sender|$start';
@@ -696,7 +739,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
       translations: {},
       timestamp: DateTime.now(),
       language: language,
-      isUnstable: isUnstable,
+      isUnstable: json['unstable'] == true,
       audioData: null,
       audioUrl: null,
     );
@@ -708,7 +751,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
           'translations': {},
           'timestamp': Timestamp.fromDate(DateTime.now()),
           'language': language,
-          'isUnstable': isUnstable,
+          'isUnstable': json['unstable'] == true,
         });
       } catch (e) {
         debugPrint('⚠️ Could not save to Firestore: $e');
@@ -808,11 +851,11 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
 
       final audio = html.AudioElement()
         ..src = message.audioUrl!
-        ..crossOrigin = 'use-credentials'  // <-- this sends cookies
+        ..crossOrigin = 'use-credentials'
         ..autoplay = true
         ..onError.listen((e) {
           debugPrint('❌ Audio error: $e – opening in new tab');
-          // Fallback: open in new tab
+									  
           html.window.open(message.audioUrl!, '_blank');
           setState(() {
             _playingKey = null;
@@ -944,7 +987,29 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
             onPressed: () => _closeSession(showConfirmation: true),
             tooltip: 'Leave session',
           ),
-          title: const Text('Live Transcript'),
+          title: Row(
+            children: [
+              const Text('Live Transcript'),
+              if (_isMicrophoneMuted) ...[
+                const SizedBox(width: 12),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.red.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.mic_off, color: Colors.red, size: 16),
+                      SizedBox(width: 4),
+                      Text('MUTED', style: TextStyle(color: Colors.red, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
           actions: [
             if (_availableLanguages.isNotEmpty)
               DropdownButton<String>(
@@ -959,7 +1024,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 ],
                 onChanged: (newLang) => setState(() => _selectedLanguage = newLang),
               ),
-            // Manual cookie override (for non‑web debugging)
+															   
             IconButton(
               icon: const Icon(Icons.edit),
               onPressed: () {
@@ -1067,7 +1132,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                 itemBuilder: (context, index) {
                   final key = filteredKeys[index];
                   final message = _messagesMap[key]!;
-                  // For web: show play button if audioUrl exists
+																 
                   final hasAudio = kIsWeb
                       ? message.audioUrl != null
                       : message.audioData != null;
@@ -1113,7 +1178,7 @@ class _LiveTranscriptScreenState extends State<LiveTranscriptScreen> {
                               onPressed: () => _playPause(key, message),
                             ),
                             const SizedBox(width: 8),
-                            // Show progress only for blob URLs (in‑page playback) or non-web
+																							   
                             if (kIsWeb && message.audioUrl != null && message.audioUrl!.startsWith('blob:'))
                               SizedBox(
                                 width: 60,
