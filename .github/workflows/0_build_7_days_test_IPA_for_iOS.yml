@@ -5,7 +5,11 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14   # downgraded to avoid Xcode 16 strictness
+    name: 🎉 iOS Build (7-days free testing)
+    runs-on: macos-14
+    env:
+      FLUTTER_SUPPRESS_SWIFT_PACKAGE_MANAGER: "1"   # disables SPM globally
+
     steps:
       - uses: actions/checkout@v4
 
@@ -15,40 +19,137 @@ jobs:
           architecture: x64
 
       - run: flutter clean
+
+      - name: Create SourcePackages directories for all platforms
+        run: |
+          mkdir -p build/ios/SourcePackages
+          mkdir -p build/macos/SourcePackages
+
       - run: flutter pub get
 
-      - name: Create GoogleService-Info.plist
-        env:
-          FIREBASE_IOS_PLIST: ${{ secrets.FIREBASE_IOS_PLIST }}
+      # --- Patch Podfile ---
+      - name: Replace post_install block in Podfile
         run: |
-          if [ -z "$FIREBASE_IOS_PLIST" ]; then
-            echo "ERROR: FIREBASE_IOS_PLIST secret is not set"
-            exit 1
-          fi
-          mkdir -p ios/Runner
-          printf '%s' "$FIREBASE_IOS_PLIST" > ios/Runner/GoogleService-Info.plist
+          python3 << 'PYTHON'
+          podfile_path = 'ios/Podfile'
+          with open(podfile_path, 'r') as f:
+              content = f.read()
+          lines = content.split('\n')
+          new_lines = []
+          in_post_install = False
+          indent_level = 0
+          for line in lines:
+              stripped = line.lstrip()
+              if stripped.startswith('post_install') and not in_post_install:
+                  in_post_install = True
+                  indent_level = len(line) - len(stripped)
+                  continue
+              if in_post_install:
+                  if stripped == 'end' or stripped.startswith('end'):
+                      current_indent = len(line) - len(stripped)
+                      if current_indent <= indent_level:
+                          in_post_install = False
+                          continue
+                  continue
+              else:
+                  new_lines.append(line)
 
-      - name: Install Pods
+          new_lines.append('')
+          new_lines.append('post_install do |installer|')
+          new_lines.append('  installer.pods_project.targets.each do |target|')
+          new_lines.append('    flutter_additional_ios_build_settings(target)')
+          new_lines.append('  end')
+          new_lines.append('')
+          new_lines.append('  installer.pods_project.targets.each do |target|')
+          new_lines.append('    target.build_configurations.each do |config|')
+          new_lines.append('      config.build_settings["DEVELOPMENT_TEAM"] = "DUMMYTEAM"')
+          new_lines.append('      config.build_settings["CODE_SIGNING_ALLOWED"] = "NO"')
+          new_lines.append('    end')
+          new_lines.append('  end')
+          new_lines.append('end')
+
+          with open(podfile_path, 'w') as f:
+              f.write('\n'.join(new_lines))
+          print("Podfile patched successfully")
+          PYTHON
+
+      # --- Patch Xcode project ---
+      - name: Force disable code signing in Xcode project
+        run: |
+          PROJECT_FILE="ios/Runner.xcodeproj/project.pbxproj"
+          plutil -convert json -o /tmp/project.json "$PROJECT_FILE"
+          python3 << 'PYTHON'
+          import json
+          with open('/tmp/project.json', 'r') as f:
+              data = json.load(f)
+          for obj in data.get('objects', {}).values():
+              if isinstance(obj, dict) and obj.get('isa') == 'XCBuildConfiguration':
+                  if 'buildSettings' not in obj:
+                      obj['buildSettings'] = {}
+                  settings = obj['buildSettings']
+                  settings['DEVELOPMENT_TEAM'] = 'DUMMYTEAM'
+                  settings['CODE_SIGN_STYLE'] = 'Manual'
+                  settings['CODE_SIGN_IDENTITY'] = ''
+                  settings['PROVISIONING_PROFILE_SPECIFIER'] = ''
+                  settings['PROVISIONING_PROFILE'] = ''
+                  settings['CODE_SIGNING_ALLOWED'] = 'NO'
+          with open('/tmp/project.json', 'w') as f:
+              json.dump(data, f, indent=2)
+          PYTHON
+          plutil -convert xml1 -o "$PROJECT_FILE" /tmp/project.json
+          echo "Project patched successfully"
+
+      # --- Install Pods ---
+      - name: Update CocoaPods repository with retry
         working-directory: ios
-        run: pod install --repo-update
+        run: |
+          for i in {1..3}; do
+            echo "Attempt $i: Updating CocoaPods repository..."
+            pod repo update && break
+            sleep 5
+          done
 
-      - name: Ensure SourcePackages directory exists
-        run: mkdir -p build/ios/SourcePackages
+      - name: Install CocoaPods dependencies with retry
+        working-directory: ios
+        run: |
+          for i in {1..5}; do
+            echo "Attempt $i: Running pod install..."
+            pod install --repo-update && break
+            echo "Retry in 10s..."
+            sleep 10
+          done
 
-      - name: Build unsigned IPA
+      # --- Build (removed the unsupported flag) ---
+      - name: Build iOS (unsigned)
         env:
-          DEVELOPMENT_TEAM: "DUMMYTEAM"
-          CODE_SIGN_STYLE: "Manual"
+          CODE_SIGNING_ALLOWED: "NO"
+          CODE_SIGN_IDENTITY: ""
         run: flutter build ios --release --no-codesign
 
-      - name: Package IPA
+      # --- Package IPA ---
+      - name: Create Payload and IPA
         working-directory: build/ios/iphoneos
         run: |
           mkdir Payload
           mv Runner.app Payload/
           zip -qq -r -9 ../FlutterIpaExport.ipa Payload/
+          ls -la ../FlutterIpaExport.ipa
 
-      - uses: actions/upload-artifact@v4
+      - name: Check IPA size
+        run: |
+          if [ -f "build/ios/FlutterIpaExport.ipa" ]; then
+            SIZE=$(stat -f%z "build/ios/FlutterIpaExport.ipa")
+            echo "IPA file size: $((SIZE / 1024 / 1024)) MB"
+          else
+            echo "ERROR: IPA file not found!"
+            exit 1
+          fi
+
+      - name: Update outdated packages (optional)
+        run: flutter pub outdated
+
+      - name: Upload IPA as Artifact
+        uses: actions/upload-artifact@v4
         with:
           name: FlutterIpaExport.ipa
           path: build/ios/FlutterIpaExport.ipa
