@@ -654,7 +654,7 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     );
 
     if (selectedName != null && mounted) {
-      await _fetchAndSharePdf(sessionId, selectedName);
+      await _fetchAndSharePdf(sessionId, selectedName, sessionUrl); // <-- sessionUrl added
     }
   }
 
@@ -824,7 +824,10 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     return file;
   }
 
-  Future<void> _fetchAndSharePdf(String sessionId, String languageName) async {
+  // ====================================================================
+  // FIXED: Added sessionUrl parameter to build the endpoint dynamically
+  // ====================================================================
+  Future<void> _fetchAndSharePdf(String sessionId, String languageName, String sessionUrl) async {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -832,9 +835,13 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     );
 
     try {
-      final uri = Uri.parse('https://lecture-translator.kit.edu/get_cached_text/$sessionId')
+      // Derive base URL from the session URL (the original short link)
+      final Uri sessionUri = Uri.parse(sessionUrl);
+      final String baseUrl = '${sessionUri.scheme}://${sessionUri.host}';
+      
+      final Uri uri = Uri.parse('$baseUrl/get_cached_text/$sessionId')
           .replace(queryParameters: {'window': languageName});
-
+          
       final response = await http.get(uri);
       developer.log('📡 URL: ${uri.toString()}');
       developer.log('📄 Status: ${response.statusCode}');
@@ -905,15 +912,15 @@ class _SessionSelectionScreenState extends State<SessionSelectionScreen>
     }
   }
 
-Future<void> _sharePdf(File pdfFile, String languageName) async {
-  await SharePlus.instance.share(
-    ShareParams(
-      files: [XFile(pdfFile.path)],
-      text: 'Lecture translation in $languageName',
-      subject: 'Lecture Translation PDF',
-    ),
-  );
-}
+  Future<void> _sharePdf(File pdfFile, String languageName) async {
+    await SharePlus.instance.share(
+      ShareParams(
+        files: [XFile(pdfFile.path)],
+        text: 'Lecture translation in $languageName',
+        subject: 'Lecture Translation PDF',
+      ),
+    );
+  }
 
   Future<void> _savePdfToDownloads(File pdfFile, String languageName) async {
     try {
