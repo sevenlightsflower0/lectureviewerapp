@@ -8,30 +8,43 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           architecture: x64
+
       - run: flutter clean
       - run: flutter pub get
+
       - name: Create GoogleService-Info.plist
         env:
           FIREBASE_IOS_PLIST: ${{ secrets.FIREBASE_IOS_PLIST }}
         run: |
-          if [ -z "$FIREBASE_IOS_PLIST" ]; then exit 1; fi
+          if [ -z "$FIREBASE_IOS_PLIST" ]; then
+            echo "ERROR: FIREBASE_IOS_PLIST secret is not set"
+            exit 1
+          fi
           mkdir -p ios/Runner
           printf '%s' "$FIREBASE_IOS_PLIST" > ios/Runner/GoogleService-Info.plist
+
       - name: Install Pods
         working-directory: ios
         run: pod install --repo-update
+
       - name: Build unsigned IPA
+        env:
+          DEVELOPMENT_TEAM: "DUMMYTEAM"          # <-- dummy team ID (can be anything)
+          CODE_SIGN_STYLE: "Manual"              # <-- prevent auto‑fetch
         run: flutter build ios --release --no-codesign
+
       - name: Package IPA
         working-directory: build/ios/iphoneos
         run: |
           mkdir Payload
           mv Runner.app Payload/
           zip -qq -r -9 ../FlutterIpaExport.ipa Payload/
+
       - uses: actions/upload-artifact@v4
         with:
           name: FlutterIpaExport.ipa
