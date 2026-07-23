@@ -24,7 +24,7 @@ jobs:
       - name: Install Pods
         working-directory: ios
         run: pod install --repo-update
-      - name: Build iOS (unsigned)
+      - name: Build unsigned IPA
         run: flutter build ios --release --no-codesign
       - name: Package IPA
         working-directory: build/ios/iphoneos
@@ -37,4 +37,3 @@ jobs:
           name: FlutterIpaExport.ipa
           path: build/ios/FlutterIpaExport.ipa
           retention-days: 7
-          
