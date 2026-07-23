@@ -5,88 +5,36 @@ on:
 
 jobs:
   build-ios:
-    name: 🎉 iOS Build (7-days free testing)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
           architecture: x64
-
       - run: flutter clean
       - run: flutter pub get
-
-      # --- (Optionally) Regenerate iOS folder ---
-      - name: Regenerate iOS folder (if needed)
-        run: |
-          rm -rf ios
-          flutter create --platforms=ios .
-
-      # --- Patch Podfile to iOS 15.0 ---
-      - name: Set iOS deployment target to 15.0
-        run: |
-          # ... (your existing Podfile patching code) ...
-
-      # --- Create Firebase plist ---
       - name: Create GoogleService-Info.plist
         env:
           FIREBASE_IOS_PLIST: ${{ secrets.FIREBASE_IOS_PLIST }}
         run: |
-          if [ -z "$FIREBASE_IOS_PLIST" ]; then
-            echo "ERROR: FIREBASE_IOS_PLIST secret is not set."
-            exit 1
-          fi
+          if [ -z "$FIREBASE_IOS_PLIST" ]; then exit 1; fi
           mkdir -p ios/Runner
           printf '%s' "$FIREBASE_IOS_PLIST" > ios/Runner/GoogleService-Info.plist
-
-      # --- Install Pods ---
-      - name: Install CocoaPods dependencies
+      - name: Install Pods
         working-directory: ios
         run: pod install --repo-update
-
-      # --- Generate config (triggers migration) ---
-      - name: Generate iOS config with iOS 15.0
-        run: flutter build ios --config-only --no-codesign
-
-      # --- Manual patch fallback ---
-      - name: Manual patch FlutterGeneratedPluginSwiftPackage
-        run: |
-          PACKAGE_FILE="ios/Flutter/ephemeral/Packages/FlutterGeneratedPluginSwiftPackage/Package.swift"
-          if [ -f "$PACKAGE_FILE" ]; then
-            sed -i '' 's/.iOS("13.0")/.iOS("15.0")/g' "$PACKAGE_FILE"
-          fi
-
-      # --- Final unsigned build ---
       - name: Build iOS (unsigned)
         run: flutter build ios --release --no-codesign
-
-      # --- Package IPA ---
-      - name: Create Payload and IPA
+      - name: Package IPA
         working-directory: build/ios/iphoneos
         run: |
           mkdir Payload
           mv Runner.app Payload/
           zip -qq -r -9 ../FlutterIpaExport.ipa Payload/
-          ls -la ../FlutterIpaExport.ipa
-
-      - name: Check IPA size
-        run: |
-          if [ -f "build/ios/FlutterIpaExport.ipa" ]; then
-            SIZE=$(stat -f%z "build/ios/FlutterIpaExport.ipa")
-            echo "IPA file size: $((SIZE / 1024 / 1024)) MB"
-          else
-            echo "ERROR: IPA file not found!"
-            exit 1
-          fi
-
-      - name: Update outdated packages (optional)
-        run: flutter pub outdated
-
-      - name: Upload IPA as Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: FlutterIpaExport.ipa
           path: build/ios/FlutterIpaExport.ipa
           retention-days: 7
+          
